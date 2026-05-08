@@ -14,6 +14,8 @@ Sito statico di presentazione del prodotto con pagine legali e contatti.
 | `contact.html` | Pagina contatti |
 | `styles.css` | Stili del sito |
 | `script.js` | Logica interattiva (menu, animazioni) |
+| `robots.txt` | Regole base per crawler |
+| `sitemap.xml` | Sitemap statica della landing |
 
 ---
 

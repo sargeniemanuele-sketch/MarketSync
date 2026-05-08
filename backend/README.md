@@ -105,9 +105,7 @@ CLOUDINARY_API_SECRET=...
 | Profile | `DELETE /api/v1/profile` | Cancellazione account |
 | Clients | `GET/POST /api/v1/clients` | Lista e creazione clienti |
 | Clients | `GET/PATCH/DELETE /api/v1/clients/:id` | Gestione singolo cliente |
-| Integrations | `GET /api/v1/integrations` | Integrazioni attive |
-| Integrations | `GET /api/v1/integrations/:provider/connect` | Avvia OAuth provider |
-| Integrations | `DELETE /api/v1/integrations/:provider` | Disconnetti provider |
+| Integrations | `/api/v1/integrations/...` | Collegamento, callback, selezione account e disconnessione provider |
 | Metrics | `GET /api/v1/metrics/...` | KPI per piattaforma |
 | Webhooks | `POST /api/v1/webhooks/shopify/...` | Webhook Shopify |
 

@@ -67,6 +67,12 @@ Ordine consigliato:
 
 ---
 
+## Note di sicurezza
+
+Il progetto utilizza JWT con refresh token in cookie HttpOnly, protezione CSRF, cifratura AES-256-GCM dei token provider e rate limiter sugli endpoint sensibili.
+
+---
+
 ## Stato progetto
 
 - Progetto finale Epicode
