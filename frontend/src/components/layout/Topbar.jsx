@@ -1,8 +1,9 @@
 import { AlertTriangle, LogOut } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { generatePath, useLocation, useNavigate } from "react-router-dom";
 import Button from "../ui/Button.jsx";
 import Badge from "../ui/Badge.jsx";
+import UserAvatar from "../common/UserAvatar.jsx";
 import useAuth from "../../hooks/useAuth.js";
 import useAppData from "../../hooks/useAppData.js";
 import { APP_NAME, APP_ROUTE_LABELS, APP_ROUTES } from "../../utils/constants.js";
@@ -13,46 +14,6 @@ function getPageTitle(pathname) {
   }
 
   return APP_ROUTE_LABELS[pathname] || APP_NAME;
-}
-
-function getInitials(user) {
-  const name = String(user?.name ?? "").trim();
-
-  if (name) {
-    return name
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((part) => part[0])
-      .join("")
-      .toUpperCase();
-  }
-
-  const email = String(user?.email ?? "").trim();
-  return email ? email[0].toUpperCase() : "U";
-}
-
-function AccountAvatar({ user }) {
-  const avatarUrl = user?.avatarUrl ?? null;
-  const [hasAvatarError, setHasAvatarError] = useState(false);
-
-  useEffect(() => {
-    setHasAvatarError(false);
-  }, [avatarUrl]);
-
-  return (
-    <div className="relative flex h-6 w-6 flex-none items-center justify-center overflow-hidden rounded-full bg-brand-100 text-xs font-semibold text-brand-700 dark:bg-brand-500/20 dark:text-brand-100">
-      <span>{getInitials(user)}</span>
-      {avatarUrl && !hasAvatarError ? (
-        <img
-          alt={`Foto profilo di ${user?.name || "utente"}`}
-          className="absolute inset-0 h-full w-full object-cover"
-          onError={() => setHasAvatarError(true)}
-          src={avatarUrl}
-        />
-      ) : null}
-    </div>
-  );
 }
 
 export default function Topbar() {
@@ -137,7 +98,7 @@ export default function Topbar() {
             title="Apri profilo"
             type="button"
           >
-            <AccountAvatar user={user} />
+            <UserAvatar user={user} size="xs" />
             <span className="hidden truncate sm:inline">{user?.name || user?.email || "Account"}</span>
           </button>
           <Button

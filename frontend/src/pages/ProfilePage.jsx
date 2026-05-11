@@ -27,6 +27,7 @@ import Input from "../components/ui/Input.jsx";
 import PageHeader from "../components/ui/PageHeader.jsx";
 import SaveButton from "../components/ui/SaveButton.jsx";
 import Spinner from "../components/ui/Spinner.jsx";
+import UserAvatar from "../components/common/UserAvatar.jsx";
 import useAppData from "../hooks/useAppData.js";
 import useAuth from "../hooks/useAuth.js";
 import { APP_ROUTES } from "../utils/constants.js";
@@ -82,22 +83,6 @@ function buildPayload(form) {
   };
 }
 
-function getInitials(profile) {
-  const name = String(profile?.name ?? "").trim();
-
-  if (name) {
-    const parts = name.split(/\s+/).filter(Boolean);
-    return parts
-      .slice(0, 2)
-      .map((part) => part[0])
-      .join("")
-      .toUpperCase();
-  }
-
-  const email = String(profile?.email ?? "").trim();
-  return email ? email[0].toUpperCase() : "U";
-}
-
 function validateForm(form) {
   const errors = {};
   const name = String(form.name ?? "").trim();
@@ -149,35 +134,6 @@ function hasProfileChanges(form, profile) {
     payload.name !== (profile.name ?? "") ||
     payload.nickname !== (profile.nickname ?? null) ||
     payload.bio !== (profile.bio ?? null)
-  );
-}
-
-function ProfileAvatar({ profile, size = "lg" }) {
-  const sizeClass = size === "lg" ? "h-24 w-24 text-2xl" : "h-14 w-14 text-lg";
-  const avatarUrl = profile?.avatarUrl ?? null;
-  const [hasAvatarError, setHasAvatarError] = useState(false);
-
-  useEffect(() => {
-    setHasAvatarError(false);
-  }, [avatarUrl]);
-
-  return (
-    <div
-      className={[
-        "relative flex flex-none items-center justify-center overflow-hidden rounded-full bg-brand-100 font-semibold text-brand-700 ring-4 ring-white dark:bg-brand-500/20 dark:text-brand-100 dark:ring-slate-900",
-        sizeClass,
-      ].join(" ")}
-    >
-      <span>{getInitials(profile)}</span>
-      {avatarUrl && !hasAvatarError ? (
-        <img
-          alt={`Foto profilo di ${profile?.name || "utente"}`}
-          className="absolute inset-0 h-full w-full object-cover"
-          onError={() => setHasAvatarError(true)}
-          src={avatarUrl}
-        />
-      ) : null}
-    </div>
   );
 }
 
@@ -534,7 +490,7 @@ export default function ProfilePage() {
             <div className="relative flex-none">
               {profile.loginProvider !== "google" ? (
                 <div className="group relative">
-                  <ProfileAvatar profile={profile} />
+                  <UserAvatar user={profile} size="lg" className="ring-4 ring-white dark:ring-slate-900" />
                   <button
                     aria-label={isUploadingAvatar ? "Caricamento in corso" : "Carica foto profilo"}
                     className="absolute inset-0 flex items-center justify-center rounded-full bg-black/55 opacity-0 transition-opacity focus-visible:opacity-100 focus-visible:outline-none group-hover:opacity-100 disabled:cursor-not-allowed"
@@ -550,7 +506,7 @@ export default function ProfilePage() {
                   </button>
                 </div>
               ) : (
-                <ProfileAvatar profile={profile} />
+                <UserAvatar user={profile} size="lg" className="ring-4 ring-white dark:ring-slate-900" />
               )}
               {profile.loginProvider !== "google" ? (
                 <input

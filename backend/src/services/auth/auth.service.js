@@ -150,10 +150,25 @@ export async function revokeRefreshToken(refreshToken) {
 
 // ── Google OAuth ──────────────────────────────────────────────────────────────
 
+function getGoogleAvatarUrl(profile) {
+  const candidates = [
+    profile._json?.picture,
+    profile.photos?.[0]?.value,
+  ];
+
+  for (const url of candidates) {
+    if (typeof url === 'string' && /^https?:\/\//i.test(url.trim())) {
+      return url.trim();
+    }
+  }
+
+  return null;
+}
+
 export async function findOrCreateGoogleUser(profile) {
   const googleId = profile.id;
   const email = profile.emails?.[0]?.value?.toLowerCase() ?? null;
-  const avatarUrl = profile.photos?.[0]?.value || profile._json?.picture || null;
+  const avatarUrl = getGoogleAvatarUrl(profile);
 
   if (!email) {
     throw new ValidationError("Non è stato possibile recuperare l'email dall'account Google. Verifica che l'account abbia un'email verificata.", { scope: 'auth' });
