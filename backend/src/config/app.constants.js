@@ -33,7 +33,7 @@ export const UPLOAD = Object.freeze({
 });
 
 export const SHOPIFY = Object.freeze({
-  API_VERSION:         '2026-01',
+  API_VERSION:         process.env.SHOPIFY_API_VERSION || '2026-01',
   ORDERS_PER_PAGE:     250,
   MAX_PAGES:           10,     // limite di sicurezza: massimo 2.500 ordini per fetch su intervallo date
   FETCH_TIMEOUT_MS:    15000,  // 15 secondi per singola richiesta GraphQL Shopify
