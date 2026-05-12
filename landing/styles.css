@@ -47,6 +47,7 @@
 html { scroll-behavior: smooth; }
 body {
   margin: 0;
+  overflow-x: hidden;
   font-family: var(--font-sans);
   font-size: 16px;
   line-height: 1.55;
@@ -119,7 +120,7 @@ em { font-style: normal; color: var(--accent-2); }
 }
 .section-sub {
   margin-top: 16px;
-  font-size: 17px;
+  font-size: clamp(15px, 3.5vw, 17px);
   color: var(--text-2);
   text-wrap: pretty;
 }
@@ -284,7 +285,11 @@ em { font-style: normal; color: var(--accent-2); }
 .trust-line svg { color: var(--accent-2); flex-shrink: 0; }
 
 /* ----------- Dashboard mockup ----------- */
-.dashboard-mock { position: relative; }
+.dashboard-mock {
+  position: relative;
+  max-width: 100%;
+  overflow: hidden;
+}
 .dashboard-mock::before {
   content: "";
   position: absolute;
@@ -299,6 +304,8 @@ em { font-style: normal; color: var(--accent-2); }
   border-radius: 14px;
   box-shadow: var(--shadow-lg);
   overflow: hidden;
+  max-width: 100%;
+  width: 100%;
 }
 .dash-chrome {
   display: flex;
@@ -842,7 +849,7 @@ em { font-style: normal; color: var(--accent-2); }
 .mock-content .dash-list .num { color: rgba(148,163,184,0.6); }
 .mock-content .stacked-bars { height: 100px; }
 
-@media (max-width: 480px) { .mock-sidebar { display: none; } }
+/* .mock-sidebar nascosta nei breakpoint piccoli — gestita nella sezione RESPONSIVE */
 
 /* ===========================================================
    LOGOS / TRUST STRIP
@@ -1325,6 +1332,8 @@ em { font-style: normal; color: var(--accent-2); }
 /* ===========================================================
    RESPONSIVE
    =========================================================== */
+
+/* ── Tablet (≤1024px) ── */
 @media (max-width: 1024px) {
   .hero-inner { grid-template-columns: 1fr; gap: 48px; }
   .dashboard-mock { order: 2; }
@@ -1332,34 +1341,52 @@ em { font-style: normal; color: var(--accent-2); }
   .dash-row { grid-template-columns: 1fr; }
   .problem-grid { grid-template-columns: repeat(2, 1fr); }
   .feat-grid { grid-template-columns: repeat(2, 1fr); }
-  .int-grid { grid-template-columns: 1fr; }
+  .int-grid { grid-template-columns: repeat(2, 1fr); }
   .security-inner { grid-template-columns: 1fr; gap: 40px; }
-  .how-steps { grid-template-columns: 1fr; }
+  .how-steps { grid-template-columns: repeat(2, 1fr); }
   .faq-inner { grid-template-columns: 1fr; gap: 32px; }
   .footer-inner { grid-template-columns: 1fr; gap: 32px; }
   .disclaimer { text-align: left; }
 }
 
+/* ── Mobile (≤720px) ── */
 @media (max-width: 720px) {
   .primary-nav, .header-actions .btn { display: none; }
   .menu-toggle { display: inline-flex; }
   .hero { padding: 48px 0 64px; }
   .hero-title { font-size: clamp(30px, 8vw, 42px); }
+  .hero-sub { max-width: 100%; }
   .problem, .features, .integrations, .security, .how, .faq, .final-cta { padding: 72px 0; }
   .problem-grid { grid-template-columns: 1fr; }
   .feat-grid { grid-template-columns: 1fr; }
+  .int-grid { grid-template-columns: 1fr; }
+  .how-steps { grid-template-columns: 1fr; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
   .cta-card { padding: 48px 24px; }
   .strip-row { gap: 16px; }
   .strip-divider { display: none; }
   .foot-nav { grid-template-columns: repeat(2, 1fr); }
   .foot-fine { flex-direction: column; gap: 8px; }
+  .btn-sm { padding: 11px 16px; }
 }
 
+/* ── Small phone (≤480px) ── */
+@media (max-width: 480px) {
+  .hero { padding: 40px 0 56px; }
+  .problem, .features, .integrations, .security, .how, .faq { padding: 56px 0; }
+  .final-cta { padding: 56px 0; }
+  .cta-card { padding: 40px 20px; }
+  .section-head { margin-bottom: 32px; }
+  .mock-sidebar { display: none; }
+  .mock-topbar-client { display: none; }
+}
+
+/* ── Extra small phone (≤420px) ── */
 @media (max-width: 420px) {
   .kpi-grid { grid-template-columns: 1fr; }
   .dash-tabs { font-size: 11px; }
   .dash-tabs .tab { padding: 4px 8px; }
+  .foot-nav { grid-template-columns: 1fr; }
 }
 
 /* ===========================================================
