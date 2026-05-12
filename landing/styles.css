@@ -288,8 +288,19 @@ em { font-style: normal; color: var(--accent-2); }
 .dashboard-mock {
   position: relative;
   max-width: 100%;
-  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
+.hero-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+.hero-img-tablet { display: none; }
+.hero-img-mobile { display: none; }
 .dashboard-mock::before {
   content: "";
   position: absolute;
@@ -1356,6 +1367,9 @@ em { font-style: normal; color: var(--accent-2); }
   .hero { padding: 48px 0 64px; }
   .hero-title { font-size: clamp(30px, 8vw, 42px); }
   .hero-sub { max-width: 100%; }
+  .hero-img-desktop { display: none; }
+  .hero-img-tablet { display: none; }
+  .hero-img-mobile { display: block; }
   .problem, .features, .integrations, .security, .how, .faq, .final-cta { padding: 72px 0; }
   .problem-grid { grid-template-columns: 1fr; }
   .feat-grid { grid-template-columns: 1fr; }
