@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://marketsync.it/sitemap.xml
+Sitemap: [LANDING_URL]/sitemap.xml
