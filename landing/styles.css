@@ -204,6 +204,7 @@ em { font-style: normal; color: var(--accent-2); }
 }
 .mobile-nav a:hover { background: var(--bg); }
 .mobile-nav .btn { margin-top: 10px; justify-content: center; }
+.mobile-nav a.btn-primary { color: #fff; }
 
 /* ===========================================================
    HERO
@@ -266,7 +267,7 @@ em { font-style: normal; color: var(--accent-2); }
 }
 .hero-ctas {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 12px;
   margin-top: 32px;
 }
@@ -1393,6 +1394,7 @@ em { font-style: normal; color: var(--accent-2); }
   .section-head { margin-bottom: 32px; }
   .mock-sidebar { display: none; }
   .mock-topbar-client { display: none; }
+  .hero-ctas .btn { padding: 11px 14px; font-size: 14px; }
 }
 
 /* ── Extra small phone (≤420px) ── */
