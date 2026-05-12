@@ -1,25 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>[LANDING_URL]/</loc>
+    <loc>https://marketsync-landing.vercel.app/</loc>
     <lastmod>2026-05-08</lastmod>
     <changefreq>monthly</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>[LANDING_URL]/privacy.html</loc>
+    <loc>https://marketsync-landing.vercel.app/privacy.html</loc>
     <lastmod>2026-05-08</lastmod>
     <changefreq>yearly</changefreq>
     <priority>0.5</priority>
   </url>
   <url>
-    <loc>[LANDING_URL]/terms.html</loc>
+    <loc>https://marketsync-landing.vercel.app/terms.html</loc>
     <lastmod>2026-05-08</lastmod>
     <changefreq>yearly</changefreq>
     <priority>0.5</priority>
   </url>
   <url>
-    <loc>[LANDING_URL]/contact.html</loc>
+    <loc>https://marketsync-landing.vercel.app/contact.html</loc>
     <lastmod>2026-05-08</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
