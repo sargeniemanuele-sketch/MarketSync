@@ -587,6 +587,29 @@ function logShopifyQLError({ shop, queryType, errors }) {
 }
 
 /**
+ * Normalizza `parseErrors` da shopifyqlQuery in un array di oggetti safe.
+ *
+ * In alcune versioni API Shopify parseErrors è uno scalar String, non un array
+ * di oggetti strutturati. Gestisce tutti i casi senza crashare:
+ *   - stringa non vuota  → [ { message: str, code: null } ]
+ *   - array              → ogni elemento wrappato se non è oggetto
+ *   - oggetto singolo    → [ oggetto ]
+ *   - null / vuoto       → []
+ */
+function normalizeShopifyQLParseErrors(raw) {
+  if (raw == null || raw === '') return [];
+  if (typeof raw === 'string') return [{ message: raw, code: null }];
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return [];
+    return raw.map((e) =>
+      e && typeof e === 'object' ? e : { message: String(e), code: null }
+    );
+  }
+  if (typeof raw === 'object') return [raw];
+  return [];
+}
+
+/**
  * Esegue una singola query ShopifyQL via GraphQL Admin API.
  *
  * Gestisce retry per 429/5xx e THROTTLED esattamente come fetchOrdersGraphQL.
@@ -609,14 +632,7 @@ async function executeShopifyQLQuery(shop, accessToken, qlQuery, queryType) {
           }
           rows
         }
-        parseErrors {
-          code
-          message
-          range {
-            start { line character }
-            end   { line character }
-          }
-        }
+        parseErrors
       }
     }`,
     variables: { query: qlQuery },
@@ -742,14 +758,16 @@ async function executeShopifyQLQuery(shop, accessToken, qlQuery, queryType) {
       );
     }
 
-    // Parse errors ShopifyQL: sintassi query non valida (es. campo non supportato)
-    if (Array.isArray(qlResponse.parseErrors) && qlResponse.parseErrors.length > 0) {
-      logShopifyQLError({ shop, queryType, errors: qlResponse.parseErrors });
+    // Parse errors ShopifyQL: sintassi query non valida (es. campo non supportato).
+    // parseErrors può essere String scalar o array a seconda della versione API.
+    const normalizedParseErrors = normalizeShopifyQLParseErrors(qlResponse.parseErrors);
+    if (normalizedParseErrors.length > 0) {
+      logShopifyQLError({ shop, queryType, errors: normalizedParseErrors });
       const parseErr = new AppError(
         'Query ShopifyQL non valida — campo non supportato o sintassi errata.',
         502, 'SHOPIFY_QL_PARSE_ERROR', { scope: 'shopify', provider: 'shopify' }
       );
-      parseErr.parseErrors = qlResponse.parseErrors;
+      parseErr.parseErrors = normalizedParseErrors;
       throw parseErr;
     }
 
