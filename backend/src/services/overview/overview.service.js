@@ -123,13 +123,12 @@ function collectProviderWarnings(provider, kpiResult) {
     });
   }
   if (provider === 'shopify' && kpiResult?.meta?.isOrderBasedFallback) {
-    // Scope read_reports mancante: usiamo Admin API orders come fallback.
-    if (kpiResult?.meta?.shopifyqlScopeRequired) {
+    if (kpiResult?.meta?.shopifyqlAccessRequired) {
       warnings.push({
-        code:    'SHOPIFY_REPORTS_SCOPE_REQUIRED',
+        code:    'SHOPIFY_REPORTS_ACCESS_REQUIRED',
         provider: 'shopify',
         scope:    'shopify',
-        message:  'Per mostrare le metriche Shopify identiche ai report Shopify Analytics è necessario lo scope read_reports. Aggiorna gli scope dell\'app e ricollega lo store.',
+        message:  'Per mostrare metriche identiche ai report Shopify Analytics, l\'app deve avere accesso ai report Shopify tramite read_reports e agli eventuali dati protetti richiesti da Shopify.',
       });
     }
     warnings.push({
@@ -137,6 +136,14 @@ function collectProviderWarnings(provider, kpiResult) {
       provider: 'shopify',
       scope:    'shopify',
       message:  'Alcune metriche Shopify sono calcolate dagli ordini e potrebbero non coincidere perfettamente con Shopify Analytics.',
+    });
+  }
+  if (provider === 'shopify' && kpiResult?.meta?.customerTypeUnavailable) {
+    warnings.push({
+      code:    'SHOPIFY_CUSTOMER_REPORT_UNAVAILABLE',
+      provider: 'shopify',
+      scope:    'shopify',
+      message:  'I dati sul tipo di cliente (new/returning) non sono disponibili dai report Shopify. Le metriche new customers, returning customers e i relativi ordini non sono disponibili.',
     });
   }
   if (kpiResult?.meta?.comparison?.previous?.error) warnings.push(buildComparisonFailedWarning(provider));
@@ -341,31 +348,31 @@ async function withMetricCache({
  * ── Fallback Admin API (ordini) ───────────────────────────────────────────────
  * fetchRawShopifyData → computeShopifyKpis
  *   Usato se ShopifyQL lancia:
- *     - SHOPIFY_REPORTS_SCOPE_REQUIRED (scope read_reports mancante)
- *     - SHOPIFY_QL_PARSE_ERROR         (campo non supportato dopo retry)
+ *     - SHOPIFY_REPORTS_ACCESS_REQUIRED (read_reports mancante o access policy)
+ *     - SHOPIFY_QL_PARSE_ERROR          (campo non supportato dopo retry)
  *   meta.isOrderBasedFallback = true
- *   meta.shopifyqlScopeRequired = true  (solo per SCOPE_REQUIRED)
+ *   meta.shopifyqlAccessRequired = true  (solo per ACCESS_REQUIRED)
  *   collectProviderWarnings emette SHOPIFY_ORDER_BASED_FALLBACK (e
- *   SHOPIFY_REPORTS_SCOPE_REQUIRED se il problema è lo scope).
+ *   SHOPIFY_REPORTS_ACCESS_REQUIRED se il problema è l'accesso).
  */
 async function runShopifyLive(params) {
   try {
     const qlResult  = await fetchShopifySalesReportQL(params);
     return computeShopifyKpisFromQL(qlResult, params);
   } catch (qlErr) {
-    const isScopeErr = qlErr?.code === 'SHOPIFY_REPORTS_SCOPE_REQUIRED';
-    const isParseErr = qlErr?.code === 'SHOPIFY_QL_PARSE_ERROR';
+    const isAccessErr = qlErr?.code === 'SHOPIFY_REPORTS_ACCESS_REQUIRED';
+    const isParseErr  = qlErr?.code === 'SHOPIFY_QL_PARSE_ERROR';
 
-    if (isScopeErr || isParseErr) {
+    if (isAccessErr || isParseErr) {
       const rawResult = await fetchRawShopifyData(params);
       const kpiResult = computeShopifyKpis(rawResult);
       return {
         ...kpiResult,
         meta: {
           ...kpiResult.meta,
-          isOrderBasedFallback:  true,
-          shopifyqlAvailable:    false,
-          shopifyqlScopeRequired: isScopeErr,
+          isOrderBasedFallback:   true,
+          shopifyqlAvailable:     false,
+          shopifyqlAccessRequired: isAccessErr,
         },
       };
     }

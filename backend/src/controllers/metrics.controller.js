@@ -234,12 +234,12 @@ export const getShopifyMetrics = asyncHandler(async (req, res) => {
     }
 
     if (result.meta?.isOrderBasedFallback) {
-      if (result.meta?.shopifyqlScopeRequired) {
+      if (result.meta?.shopifyqlAccessRequired) {
         warnings.push({
-          code:     'SHOPIFY_REPORTS_SCOPE_REQUIRED',
+          code:     'SHOPIFY_REPORTS_ACCESS_REQUIRED',
           provider: 'shopify',
           scope:    'shopify',
-          message:  'Per mostrare le metriche Shopify identiche ai report Shopify Analytics è necessario lo scope read_reports. Aggiorna gli scope dell\'app e ricollega lo store.',
+          message:  'Per mostrare metriche identiche ai report Shopify Analytics, l\'app deve avere accesso ai report Shopify tramite read_reports e agli eventuali dati protetti richiesti da Shopify.',
         });
       }
       warnings.push({
@@ -247,6 +247,15 @@ export const getShopifyMetrics = asyncHandler(async (req, res) => {
         provider: 'shopify',
         scope:    'shopify',
         message:  'Alcune metriche Shopify sono calcolate dagli ordini e potrebbero non coincidere perfettamente con Shopify Analytics.',
+      });
+    }
+
+    if (result.meta?.customerTypeUnavailable) {
+      warnings.push({
+        code:     'SHOPIFY_CUSTOMER_REPORT_UNAVAILABLE',
+        provider: 'shopify',
+        scope:    'shopify',
+        message:  'I dati sul tipo di cliente (new/returning) non sono disponibili dai report Shopify. Le metriche new customers, returning customers e i relativi ordini non sono disponibili.',
       });
     }
 

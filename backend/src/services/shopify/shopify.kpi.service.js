@@ -502,8 +502,9 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
   const {
     aggregateRows,
     customerTypeRows,
+    customerTypeError,
     timeseriesRows,
-    hasNetQuantity,
+    hasUnitsSold,
     hasAverageOrderValue,
     meta: fetchMeta,
   } = qlResult;
@@ -527,19 +528,20 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
   const totalSales = parseQLDecimal(agg.total_sales) ?? (netSales + shipping + taxes);
   const orders     = parseQLInt(agg.orders)          ?? 0;
 
-  // AOV: usa il valore QL se disponibile, altrimenti calcola con formula ufficiale.
-  let averageOrderValue;
+  // AOV: usa il valore QL se disponibile.
+  // Se ShopifyQL non espone average_order_value, NON calcolare con formula approssimata:
+  // Shopify usa "gross sales excluding adjustments" che non coincide con gross_sales
+  // aggregato in tutti i casi. averageOrderValue null → omesso da summary → not_available.
+  let averageOrderValue = null;
   if (hasAverageOrderValue && agg.average_order_value != null) {
-    averageOrderValue = parseQLDecimal(agg.average_order_value) ?? 0;
-  } else {
-    averageOrderValue = orders > 0 ? (grossSales - discounts) / orders : 0;
+    averageOrderValue = parseQLDecimal(agg.average_order_value);
   }
 
-  // units_sold: usa net_quantity da ShopifyQL (netto resi) se disponibile.
-  // net_quantity è il nome ufficiale nel dataset FROM sales.
+  // units_sold: usa il campo units_sold da ShopifyQL (prima scelta documentata).
+  // Se non disponibile (parse error nella query full → retry minimal), not_available.
   let unitsSold = null;
-  if (hasNetQuantity && agg.net_quantity != null) {
-    unitsSold = parseQLInt(agg.net_quantity);
+  if (hasUnitsSold && agg.units_sold != null) {
+    unitsSold = parseQLInt(agg.units_sold);
   }
 
   // ── Customer type ─────────────────────────────────────────────────────────
@@ -565,8 +567,8 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
 
   // ── Summary ───────────────────────────────────────────────────────────────
   // refundedAmount omesso: non esiste in FROM sales come importo cash.
-  // unitsSold omesso se net_quantity non era supportato.
-  // Customer metrics omesse se customer_type non disponibile.
+  // unitsSold omesso se units_sold non era supportato dalla query QL.
+  // Customer metrics omesse se la query customer_type non è disponibile.
 
   const officialSummary = {
     [SHOPIFY_KPI_KEYS.totalSales]:        round2(totalSales),
@@ -577,7 +579,7 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
     [SHOPIFY_KPI_KEYS.shipping]:          round2(shipping),
     [SHOPIFY_KPI_KEYS.taxes]:             round2(taxes),
     [SHOPIFY_KPI_KEYS.orders]:            orders,
-    [SHOPIFY_KPI_KEYS.averageOrderValue]: round2(averageOrderValue),
+    ...(averageOrderValue != null ? { [SHOPIFY_KPI_KEYS.averageOrderValue]: round2(averageOrderValue) } : {}),
     ...(unitsSold != null ? { [SHOPIFY_KPI_KEYS.unitsSold]: unitsSold } : {}),
     ...(newCustomers != null            ? { [SHOPIFY_KPI_KEYS.newCustomers]: newCustomers }                       : {}),
     ...(returningCustomers != null      ? { [SHOPIFY_KPI_KEYS.returningCustomers]: returningCustomers }           : {}),
@@ -588,8 +590,11 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
 
   const seriesByMetricKey = buildShopifyQLSeriesByMetricKey(timeseriesRows);
 
-  const hasCustomerType = Array.isArray(customerTypeRows) && customerTypeRows.length > 0;
-  const hasTimeseries   = Array.isArray(timeseriesRows)   && timeseriesRows.length   > 0;
+  const hasCustomerType    = Array.isArray(customerTypeRows) && customerTypeRows.length > 0;
+  const hasTimeseries      = Array.isArray(timeseriesRows)   && timeseriesRows.length   > 0;
+  // customerTypeUnavailable: true solo se la query ha fallito con errore.
+  // false se ha funzionato (anche con zero righe).
+  const customerTypeUnavailable = Boolean(customerTypeError);
 
   return {
     summary: withLegacyAliases(officialSummary),
@@ -602,20 +607,20 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
       range,
       startDate,
       endDate,
-      fetchedAt:              fetchMeta?.fetchedAt ?? null,
-      truncated:              false,
-      pagesFetched:           null,
-      isPartialData:          false,
-      isOrderBasedFallback:   false,
-      shopifyqlAvailable:     true,
-      hasNetQuantityFromQL:   hasNetQuantity,
+      fetchedAt:               fetchMeta?.fetchedAt ?? null,
+      truncated:               false,
+      pagesFetched:            null,
+      isPartialData:           false,
+      isOrderBasedFallback:    false,
+      shopifyqlAvailable:      true,
+      hasUnitsSoldFromQL:      hasUnitsSold,
       hasAverageOrderValueFromQL: hasAverageOrderValue,
-      hasCustomerTypeFromQL:  hasCustomerType,
-      hasTimeseriesFromQL:    hasTimeseries,
+      hasCustomerTypeFromQL:   hasCustomerType,
+      customerTypeUnavailable,
+      hasTimeseriesFromQL:     hasTimeseries,
       // refundedAmount non disponibile da ShopifyQL:
-      // il card builder lo marca not_available automaticamente
-      // perché la chiave è assente da summary.
-      refundedAmountSource:  'not_available',
+      // il card builder lo marca not_available perché la chiave è assente da summary.
+      refundedAmountSource:    'not_available',
     },
   };
 }

@@ -530,44 +530,6 @@ async function fetchAllOrders(shop, accessToken, { startDate, endDate }, graphql
   };
 }
 
-// ── API pubblica ──────────────────────────────────────────────────────────────
-
-/**
- * Recupera i dati grezzi degli ordini Shopify per un client dentro un range date.
- *
- * Usa GraphQL Admin API con filtro processed_at così il range copre gli ordini
- * effettivamente processati nel periodo (non solo creati).
- *
- * Restituisce nodi ordine GraphQL (camelCase) pronti per shopify.normalize.service.js.
- * Nessuna normalizzazione, nessun calcolo KPI, nessuna formattazione UI.
- *
- * L'ownership di clientId deve essere verificata dal chiamante (layer route/controller)
- * prima di invocare questa funzione. Questo service controlla solo lo stato integrazione.
- *
- * I sync log sono a miglior sforzo: i fallimenti di log sono silenziati così non causano
- * mai il fallimento di un fetch. I log di successo vengono avviati senza attesa (nessuna latenza aggiunta).
- * Anche i log di errore vengono avviati senza attesa; l'errore originale viene rilanciato
- * a prescindere dal successo del logging.
- *
- * @param {object} params
- * @param {string} params.clientId
- * @param {string} params.range       Etichetta range (es. 'last_7_days'): per sync log
- * @param {Date}   params.startDate   Inizio inclusivo (normalizzato a UTC dal chiamante)
- * @param {Date}   params.endDate     Fine inclusiva   (normalizzata a UTC dal chiamante)
- *
- * @returns {Promise<{
- *   orders: object[],
- *   meta: {
- *     fetchedAt:    Date,
- *     range:        string,
- *     startDate:    Date,
- *     endDate:      Date,
- *     orderCount:   number,
- *     pagesFetched: number,
- *     truncated:    boolean,
- *   }
- * }>}
- */
 // ── ShopifyQL / Shopify Reports ───────────────────────────────────────────────
 //
 // Usa shopifyqlQuery (GraphQL Admin API) come fonte primaria per le metriche
@@ -743,9 +705,11 @@ async function executeShopifyQLQuery(shop, accessToken, qlQuery, queryType) {
       logShopifyQLError({ shop, queryType, errors: body.errors });
 
       if (isShopifyScopeError(errorCode, errorMsg)) {
+        // Non assumiamo che manchi solo read_reports: potrebbe essere anche una
+        // access policy su dati protetti. Il messaggio frontend è generico.
         throw new AppError(
-          'Lo scope read_reports è necessario per accedere ai report Shopify Analytics. Aggiungi read_reports agli scope dell\'app e ricollega lo store.',
-          422, 'SHOPIFY_REPORTS_SCOPE_REQUIRED', { scope: 'shopify', provider: 'shopify' }
+          'Per mostrare metriche identiche ai report Shopify Analytics, l\'app deve avere accesso ai report Shopify tramite read_reports e agli eventuali dati protetti richiesti da Shopify.',
+          422, 'SHOPIFY_REPORTS_ACCESS_REQUIRED', { scope: 'shopify', provider: 'shopify' }
         );
       }
 
@@ -781,16 +745,16 @@ async function executeShopifyQLQuery(shop, accessToken, qlQuery, queryType) {
 /**
  * Recupera le metriche Shopify tramite ShopifyQL / Shopify Reports.
  *
- * Richiede lo scope read_reports. Se mancante, lancia SHOPIFY_REPORTS_SCOPE_REQUIRED
- * così il chiamante può attivare il fallback Admin API con warning.
+ * Richiede lo scope read_reports. Se mancante (o access policy Shopify lo nega),
+ * lancia SHOPIFY_REPORTS_ACCESS_REQUIRED così il chiamante attiva il fallback Admin API.
  *
- * Esegue tre query in parallelo:
- *   1. Aggregato sales: metriche principali (+ net_quantity e average_order_value opzionali)
+ * Esegue tre query:
+ *   1. Aggregato sales: metriche principali (+ units_sold e average_order_value opzionali)
  *   2. Customer type:   ordini/clienti distinti per first_time vs returning (non critica)
  *   3. Timeseries day:  serie giornaliere per le sparkline (non critica)
  *
- * Se net_quantity o average_order_value causano un parse error, si ritenta
- * automaticamente senza di essi (retry minimalista).
+ * Se units_sold o average_order_value causano un parse error, si ritenta
+ * automaticamente con la query minimale senza di essi.
  *
  * @param {object} params
  * @param {string} params.clientId
@@ -814,51 +778,51 @@ export async function fetchShopifySalesReportQL({ clientId, startDate, endDate }
 
   // ── 1. Query aggregato (con retry se i campi opzionali non sono supportati) ──
 
-  let aggregateRows       = null;
-  let hasNetQuantity      = false;
+  let aggregateRows        = null;
+  let hasUnitsSold         = false;
   let hasAverageOrderValue = false;
 
-  const fullAggQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders, net_quantity, average_order_value SINCE ${since} UNTIL ${until}`;
+  // Prima scelta: units_sold è il nome documentato da Shopify nel dataset FROM sales.
+  // average_order_value è opzionale; entrambi esclusi nel retry se il parser li rifiuta.
+  const fullAggQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders, units_sold, average_order_value SINCE ${since} UNTIL ${until}`;
   try {
     aggregateRows        = await executeShopifyQLQuery(shop, accessToken, fullAggQuery, 'sales_aggregate_full');
-    hasNetQuantity       = true;
+    hasUnitsSold         = true;
     hasAverageOrderValue = true;
   } catch (fullErr) {
     if (fullErr.code === 'SHOPIFY_QL_PARSE_ERROR') {
-      // Retry con solo i campi garantiti
+      // Retry con soli i campi garantiti: units_sold e average_order_value → not_available
       const minAggQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders SINCE ${since} UNTIL ${until}`;
       aggregateRows = await executeShopifyQLQuery(shop, accessToken, minAggQuery, 'sales_aggregate_minimal');
-      // hasNetQuantity e hasAverageOrderValue rimangono false
+      // hasUnitsSold e hasAverageOrderValue rimangono false → not_available nel summary
     } else {
       throw fullErr;
     }
   }
 
-  // ── 2. Customer type (non critica: errori silenziati) ─────────────────────
+  // ── 2+3. Customer type e timeseries in parallelo (entrambi non critici) ────
+  // Gli errori vengono silenziati: le metriche dipendenti saranno not_available.
 
-  let customerTypeRows = null;
-  try {
-    const ctQuery = `FROM sales SHOW orders, customers GROUP BY customer_type SINCE ${since} UNTIL ${until}`;
-    customerTypeRows = await executeShopifyQLQuery(shop, accessToken, ctQuery, 'customer_type');
-  } catch {
-    customerTypeRows = null;
-  }
+  const ctQuery = `FROM sales SHOW orders, customers GROUP BY customer_type SINCE ${since} UNTIL ${until}`;
+  const tsQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders TIMESERIES day SINCE ${since} UNTIL ${until}`;
 
-  // ── 3. Timeseries giornaliero per sparkline (non critica) ─────────────────
+  const [ctResult, tsResult] = await Promise.allSettled([
+    executeShopifyQLQuery(shop, accessToken, ctQuery, 'customer_type'),
+    executeShopifyQLQuery(shop, accessToken, tsQuery, 'sales_timeseries'),
+  ]);
 
-  let timeseriesRows = null;
-  try {
-    const tsQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders TIMESERIES day SINCE ${since} UNTIL ${until}`;
-    timeseriesRows = await executeShopifyQLQuery(shop, accessToken, tsQuery, 'sales_timeseries');
-  } catch {
-    timeseriesRows = null;
-  }
+  const customerTypeRows  = ctResult.status === 'fulfilled' ? ctResult.value : null;
+  // true solo se la query ha lanciato un errore (parse error, access denied, ecc.)
+  // false se è riuscita — anche se ha restituito zero righe (range senza ordini).
+  const customerTypeError = ctResult.status === 'rejected';
+  const timeseriesRows    = tsResult.status === 'fulfilled' ? tsResult.value : null;
 
   return {
     aggregateRows,
     customerTypeRows,
+    customerTypeError,
     timeseriesRows,
-    hasNetQuantity,
+    hasUnitsSold,
     hasAverageOrderValue,
     meta: { startDate, endDate, fetchedAt: new Date() },
   };
@@ -866,6 +830,42 @@ export async function fetchShopifySalesReportQL({ clientId, startDate, endDate }
 
 // ── Admin API (ordini) ────────────────────────────────────────────────────────
 
+/**
+ * Recupera i dati grezzi degli ordini Shopify per un client dentro un range date.
+ *
+ * Usa GraphQL Admin API con filtro processed_at così il range copre gli ordini
+ * effettivamente processati nel periodo (non solo creati).
+ *
+ * Restituisce nodi ordine GraphQL (camelCase) pronti per shopify.normalize.service.js.
+ * Nessuna normalizzazione, nessun calcolo KPI, nessuna formattazione UI.
+ *
+ * L'ownership di clientId deve essere verificata dal chiamante (layer route/controller)
+ * prima di invocare questa funzione. Questo service controlla solo lo stato integrazione.
+ *
+ * I sync log sono a miglior sforzo: i fallimenti di log sono silenziati così non causano
+ * mai il fallimento di un fetch. I log di successo vengono avviati senza attesa (nessuna latenza aggiunta).
+ * Anche i log di errore vengono avviati senza attesa; l'errore originale viene rilanciato
+ * a prescindere dal successo del logging.
+ *
+ * @param {object} params
+ * @param {string} params.clientId
+ * @param {string} params.range       Etichetta range (es. 'last_7_days'): per sync log
+ * @param {Date}   params.startDate   Inizio inclusivo (normalizzato a UTC dal chiamante)
+ * @param {Date}   params.endDate     Fine inclusiva   (normalizzata a UTC dal chiamante)
+ *
+ * @returns {Promise<{
+ *   orders: object[],
+ *   meta: {
+ *     fetchedAt:    Date,
+ *     range:        string,
+ *     startDate:    Date,
+ *     endDate:      Date,
+ *     orderCount:   number,
+ *     pagesFetched: number,
+ *     truncated:    boolean,
+ *   }
+ * }>}
+ */
 export async function fetchRawShopifyData({ clientId, range, startDate, endDate }) {
   const { shop, accessToken } = await resolveShopifyIntegration(clientId);
 
