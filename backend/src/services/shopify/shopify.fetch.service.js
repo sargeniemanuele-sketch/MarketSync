@@ -559,11 +559,16 @@ function formatShopifyQLDate(date) {
 
 function parseShopifyQLTable(tableData) {
   if (!tableData) return null;
-  const headers = (tableData.headers ?? []).map((h) => h.name);
-  const rawRows = Array.isArray(tableData.rowData) ? tableData.rowData : [];
+  // columns (API 2024-04+) o headers (versioni precedenti)
+  const columnDefs = tableData.columns ?? tableData.headers ?? [];
+  const names = columnDefs.map((c) => c.name);
+  // rows (API 2024-04+) o rowData (versioni precedenti)
+  const rawRows = Array.isArray(tableData.rows) ? tableData.rows
+    : Array.isArray(tableData.rowData)          ? tableData.rowData
+    : [];
   return rawRows.map((row) => {
     const obj = {};
-    headers.forEach((name, i) => { obj[name] = row[i] ?? null; });
+    names.forEach((name, i) => { obj[name] = row[i] ?? null; });
     return obj;
   });
 }
@@ -594,17 +599,27 @@ function logShopifyQLError({ shop, queryType, errors }) {
 async function executeShopifyQLQuery(shop, accessToken, qlQuery, queryType) {
   const url = buildShopifyGraphQLUrl(shop);
   const gqlBody = JSON.stringify({
-    query: `{
-      shopifyqlQuery(query: ${JSON.stringify(qlQuery)}) {
-        ... on TableResponse {
-          tableData {
-            headers { name dataType }
-            rowData
+    query: `query ShopifyQLReport($query: String!) {
+      shopifyqlQuery(query: $query) {
+        tableData {
+          columns {
+            name
+            dataType
+            displayName
+          }
+          rows
+        }
+        parseErrors {
+          code
+          message
+          range {
+            start { line character }
+            end   { line character }
           }
         }
-        parseErrors { code message }
       }
     }`,
+    variables: { query: qlQuery },
   });
 
   let attempt = 0;
