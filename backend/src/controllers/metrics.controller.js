@@ -233,6 +233,23 @@ export const getShopifyMetrics = asyncHandler(async (req, res) => {
       });
     }
 
+    if (result.meta?.isOrderBasedFallback) {
+      if (result.meta?.shopifyqlScopeRequired) {
+        warnings.push({
+          code:     'SHOPIFY_REPORTS_SCOPE_REQUIRED',
+          provider: 'shopify',
+          scope:    'shopify',
+          message:  'Per mostrare le metriche Shopify identiche ai report Shopify Analytics è necessario lo scope read_reports. Aggiorna gli scope dell\'app e ricollega lo store.',
+        });
+      }
+      warnings.push({
+        code:     'SHOPIFY_ORDER_BASED_FALLBACK',
+        provider: 'shopify',
+        scope:    'shopify',
+        message:  'Alcune metriche Shopify sono calcolate dagli ordini e potrebbero non coincidere perfettamente con Shopify Analytics.',
+      });
+    }
+
     return sendSuccess(res, buildProviderSection({
       provider: 'shopify',
       providerResult: result,

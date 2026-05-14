@@ -8,10 +8,11 @@ import {
   resolvePreviousRangeLabel,
   toAppDateString,
 } from '../../utils/ranges.js';
-import { fetchRawShopifyData } from '../shopify/shopify.fetch.service.js';
+import { fetchRawShopifyData, fetchShopifySalesReportQL } from '../shopify/shopify.fetch.service.js';
 import {
   compareShopifyKpis,
   computeShopifyKpis,
+  computeShopifyKpisFromQL,
 } from '../shopify/shopify.kpi.service.js';
 import { fetchRawMetaAdsData } from '../metaAds/metaAds.fetch.service.js';
 import { normalizeMetaAdsInsights } from '../metaAds/metaAds.normalize.service.js';
@@ -119,6 +120,23 @@ function collectProviderWarnings(provider, kpiResult) {
       provider: 'shopify',
       scope:    'shopify',
       message:  'Alcune metriche Shopify sono parziali perché i dati avanzati su clienti, resi o rimborsi non sono disponibili con gli scope correnti.',
+    });
+  }
+  if (provider === 'shopify' && kpiResult?.meta?.isOrderBasedFallback) {
+    // Scope read_reports mancante: usiamo Admin API orders come fallback.
+    if (kpiResult?.meta?.shopifyqlScopeRequired) {
+      warnings.push({
+        code:    'SHOPIFY_REPORTS_SCOPE_REQUIRED',
+        provider: 'shopify',
+        scope:    'shopify',
+        message:  'Per mostrare le metriche Shopify identiche ai report Shopify Analytics è necessario lo scope read_reports. Aggiorna gli scope dell\'app e ricollega lo store.',
+      });
+    }
+    warnings.push({
+      code:    'SHOPIFY_ORDER_BASED_FALLBACK',
+      provider: 'shopify',
+      scope:    'shopify',
+      message:  'Alcune metriche Shopify sono calcolate dagli ordini e potrebbero non coincidere perfettamente con Shopify Analytics.',
     });
   }
   if (kpiResult?.meta?.comparison?.previous?.error) warnings.push(buildComparisonFailedWarning(provider));
@@ -312,9 +330,48 @@ async function withMetricCache({
 
 // ── Pipeline provider ─────────────────────────────────────────────────────────
 
+/**
+ * Pipeline live Shopify: tenta ShopifyQL (fonte primaria) con fallback Admin API.
+ *
+ * ── Fonte primaria ────────────────────────────────────────────────────────────
+ * fetchShopifySalesReportQL → computeShopifyKpisFromQL
+ *   Richiede scope read_reports. Produce metriche identiche a Shopify Analytics.
+ *   meta.apiSource = 'shopifyql_report'
+ *
+ * ── Fallback Admin API (ordini) ───────────────────────────────────────────────
+ * fetchRawShopifyData → computeShopifyKpis
+ *   Usato se ShopifyQL lancia:
+ *     - SHOPIFY_REPORTS_SCOPE_REQUIRED (scope read_reports mancante)
+ *     - SHOPIFY_QL_PARSE_ERROR         (campo non supportato dopo retry)
+ *   meta.isOrderBasedFallback = true
+ *   meta.shopifyqlScopeRequired = true  (solo per SCOPE_REQUIRED)
+ *   collectProviderWarnings emette SHOPIFY_ORDER_BASED_FALLBACK (e
+ *   SHOPIFY_REPORTS_SCOPE_REQUIRED se il problema è lo scope).
+ */
 async function runShopifyLive(params) {
-  const rawResult = await fetchRawShopifyData(params);
-  return computeShopifyKpis(rawResult);
+  try {
+    const qlResult  = await fetchShopifySalesReportQL(params);
+    return computeShopifyKpisFromQL(qlResult, params);
+  } catch (qlErr) {
+    const isScopeErr = qlErr?.code === 'SHOPIFY_REPORTS_SCOPE_REQUIRED';
+    const isParseErr = qlErr?.code === 'SHOPIFY_QL_PARSE_ERROR';
+
+    if (isScopeErr || isParseErr) {
+      const rawResult = await fetchRawShopifyData(params);
+      const kpiResult = computeShopifyKpis(rawResult);
+      return {
+        ...kpiResult,
+        meta: {
+          ...kpiResult.meta,
+          isOrderBasedFallback:  true,
+          shopifyqlAvailable:    false,
+          shopifyqlScopeRequired: isScopeErr,
+        },
+      };
+    }
+
+    throw qlErr;
+  }
 }
 
 async function runMetaAdsLive(params) {

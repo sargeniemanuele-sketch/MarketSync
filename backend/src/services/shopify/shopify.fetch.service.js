@@ -568,6 +568,304 @@ async function fetchAllOrders(shop, accessToken, { startDate, endDate }, graphql
  *   }
  * }>}
  */
+// ── ShopifyQL / Shopify Reports ───────────────────────────────────────────────
+//
+// Usa shopifyqlQuery (GraphQL Admin API) come fonte primaria per le metriche
+// sales. Richiede lo scope read_reports sul token.
+//
+// La query ShopifyQL usa SINCE/UNTIL con formato YYYY-MM-DD.
+// UNTIL è inclusivo e corrisponde al giorno finale del range.
+//
+// Tre query parallele:
+//   1. Aggregato:      SHOW total_sales, gross_sales, discounts, returns,
+//                           net_sales, shipping, taxes, orders, net_quantity,
+//                           average_order_value
+//   2. Customer type:  SHOW orders, customers GROUP BY customer_type
+//   3. Timeseries:     TIMESERIES day per le sparkline
+//
+// Se net_quantity o average_order_value non sono supportati, vengono esclusi
+// con un retry automatico (SHOPIFY_QL_PARSE_ERROR).
+// Se read_reports manca, lancia SHOPIFY_REPORTS_SCOPE_REQUIRED.
+
+function formatShopifyQLDate(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function parseShopifyQLTable(tableData) {
+  if (!tableData) return null;
+  const headers = (tableData.headers ?? []).map((h) => h.name);
+  const rawRows = Array.isArray(tableData.rowData) ? tableData.rowData : [];
+  return rawRows.map((row) => {
+    const obj = {};
+    headers.forEach((name, i) => { obj[name] = row[i] ?? null; });
+    return obj;
+  });
+}
+
+function logShopifyQLError({ shop, queryType, errors }) {
+  if (!errors || errors.length === 0) return;
+  const shopMasked = typeof shop === 'string' ? shop.replace(/^[^.]+/, '[store]') : '[unknown]';
+  console.error('[shopify:shopifyql_error]', JSON.stringify({
+    provider:   'shopify',
+    apiVersion: env.shopify.apiVersion || SHOPIFY.API_VERSION,
+    queryType,
+    message:    errors[0]?.message ?? null,
+    code:       errors[0]?.code    ?? null,
+    shop:       shopMasked,
+  }));
+}
+
+/**
+ * Esegue una singola query ShopifyQL via GraphQL Admin API.
+ *
+ * Gestisce retry per 429/5xx e THROTTLED esattamente come fetchOrdersGraphQL.
+ * Lancia SHOPIFY_REPORTS_SCOPE_REQUIRED se manca read_reports.
+ * Lancia SHOPIFY_QL_PARSE_ERROR se la query ShopifyQL ha errori di sintassi
+ * (utile per retry senza campi opzionali).
+ *
+ * @returns {object[]} Righe parsed ({header: value, ...} per riga)
+ */
+async function executeShopifyQLQuery(shop, accessToken, qlQuery, queryType) {
+  const url = buildShopifyGraphQLUrl(shop);
+  const gqlBody = JSON.stringify({
+    query: `{
+      shopifyqlQuery(query: ${JSON.stringify(qlQuery)}) {
+        ... on TableResponse {
+          tableData {
+            headers { name dataType }
+            rowData
+          }
+        }
+        parseErrors { code message }
+      }
+    }`,
+  });
+
+  let attempt = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), SHOPIFY.FETCH_TIMEOUT_MS);
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method:  'POST',
+        headers: buildShopifyHeaders(accessToken),
+        body:    gqlBody,
+        signal:  controller.signal,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new AppError(
+          'Shopify sta impiegando troppo tempo a rispondere. Riprova tra qualche minuto.',
+          504, 'SHOPIFY_TIMEOUT', { scope: 'shopify', provider: 'shopify' }
+        );
+      }
+      if (attempt < SHOPIFY.MAX_RETRIES) { attempt++; await sleep(SHOPIFY.RETRY_BASE_DELAY_MS); continue; }
+      throw new AppError(
+        'Impossibile comunicare con Shopify. Riprova tra qualche minuto.',
+        502, 'SHOPIFY_NETWORK_ERROR', { scope: 'shopify', provider: 'shopify' }
+      );
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!response.ok) {
+      const isAuth      = response.status === 401 || response.status === 403;
+      const isRateLimit = response.status === 429;
+      const isTransient = response.status >= 500;
+
+      if (isAuth) {
+        const authErr = new AppError(
+          'L\'autorizzazione Shopify non è più valida. Ricollega lo store.',
+          422, 'SHOPIFY_REAUTH_REQUIRED', { scope: 'shopify', provider: 'shopify' }
+        );
+        authErr.providerHttpStatus = response.status;
+        throw authErr;
+      }
+
+      if ((isRateLimit || isTransient) && attempt < SHOPIFY.MAX_RETRIES) {
+        const delay = isRateLimit
+          ? (parseInt(response.headers.get('Retry-After') ?? '2', 10) * 1000)
+          : SHOPIFY.RETRY_BASE_DELAY_MS * (2 ** attempt);
+        attempt++;
+        await sleep(delay);
+        continue;
+      }
+
+      const appErr = new AppError(
+        isRateLimit
+          ? 'Shopify rate limit raggiunto — riprova tra qualche secondo.'
+          : 'Errore durante il recupero dei dati da Shopify. Riprova tra qualche minuto.',
+        isRateLimit ? 429 : 502,
+        isRateLimit ? 'SHOPIFY_RATE_LIMITED' : 'SHOPIFY_API_ERROR',
+        { scope: 'shopify', provider: 'shopify' }
+      );
+      appErr.providerHttpStatus = response.status;
+      throw appErr;
+    }
+
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      throw new AppError(
+        'Shopify ha restituito una risposta non valida. Riprova tra qualche minuto.',
+        502, 'SHOPIFY_API_ERROR', { scope: 'shopify', provider: 'shopify' }
+      );
+    }
+
+    // Errori GraphQL a livello trasporto (non parse errors ShopifyQL)
+    if (Array.isArray(body?.errors) && body.errors.length > 0) {
+      const firstError = body.errors[0];
+      const extensions = firstError?.extensions ?? {};
+      const errorCode  = extensions.code ?? '';
+      const errorMsg   = String(firstError?.message ?? '').toLowerCase();
+
+      if (errorCode === 'THROTTLED') {
+        if (attempt < SHOPIFY.MAX_RETRIES) {
+          attempt++;
+          await sleep(SHOPIFY.RETRY_BASE_DELAY_MS * (2 ** (attempt - 1)));
+          continue;
+        }
+        throw new AppError(
+          'Shopify rate limit raggiunto — riprova tra qualche secondo.',
+          429, 'SHOPIFY_RATE_LIMITED', { scope: 'shopify', provider: 'shopify' }
+        );
+      }
+
+      logShopifyQLError({ shop, queryType, errors: body.errors });
+
+      if (isShopifyScopeError(errorCode, errorMsg)) {
+        throw new AppError(
+          'Lo scope read_reports è necessario per accedere ai report Shopify Analytics. Aggiungi read_reports agli scope dell\'app e ricollega lo store.',
+          422, 'SHOPIFY_REPORTS_SCOPE_REQUIRED', { scope: 'shopify', provider: 'shopify' }
+        );
+      }
+
+      throw new AppError(
+        'Errore durante il recupero dei dati da Shopify. Riprova tra qualche minuto.',
+        502, 'SHOPIFY_API_ERROR', { scope: 'shopify', provider: 'shopify' }
+      );
+    }
+
+    const qlResponse = body?.data?.shopifyqlQuery;
+    if (!qlResponse) {
+      throw new AppError(
+        'Shopify ha restituito una risposta ShopifyQL non valida. Riprova tra qualche minuto.',
+        502, 'SHOPIFY_API_ERROR', { scope: 'shopify', provider: 'shopify' }
+      );
+    }
+
+    // Parse errors ShopifyQL: sintassi query non valida (es. campo non supportato)
+    if (Array.isArray(qlResponse.parseErrors) && qlResponse.parseErrors.length > 0) {
+      logShopifyQLError({ shop, queryType, errors: qlResponse.parseErrors });
+      const parseErr = new AppError(
+        'Query ShopifyQL non valida — campo non supportato o sintassi errata.',
+        502, 'SHOPIFY_QL_PARSE_ERROR', { scope: 'shopify', provider: 'shopify' }
+      );
+      parseErr.parseErrors = qlResponse.parseErrors;
+      throw parseErr;
+    }
+
+    return parseShopifyQLTable(qlResponse.tableData);
+  }
+}
+
+/**
+ * Recupera le metriche Shopify tramite ShopifyQL / Shopify Reports.
+ *
+ * Richiede lo scope read_reports. Se mancante, lancia SHOPIFY_REPORTS_SCOPE_REQUIRED
+ * così il chiamante può attivare il fallback Admin API con warning.
+ *
+ * Esegue tre query in parallelo:
+ *   1. Aggregato sales: metriche principali (+ net_quantity e average_order_value opzionali)
+ *   2. Customer type:   ordini/clienti distinti per first_time vs returning (non critica)
+ *   3. Timeseries day:  serie giornaliere per le sparkline (non critica)
+ *
+ * Se net_quantity o average_order_value causano un parse error, si ritenta
+ * automaticamente senza di essi (retry minimalista).
+ *
+ * @param {object} params
+ * @param {string} params.clientId
+ * @param {Date}   params.startDate
+ * @param {Date}   params.endDate
+ *
+ * @returns {{
+ *   aggregateRows:     object[] | null,
+ *   customerTypeRows:  object[] | null,
+ *   timeseriesRows:    object[] | null,
+ *   hasNetQuantity:    boolean,
+ *   hasAverageOrderValue: boolean,
+ *   meta: { startDate: Date, endDate: Date, fetchedAt: Date }
+ * }}
+ */
+export async function fetchShopifySalesReportQL({ clientId, startDate, endDate }) {
+  const { shop, accessToken } = await resolveShopifyIntegration(clientId);
+
+  const since = formatShopifyQLDate(startDate);
+  const until  = formatShopifyQLDate(endDate);
+
+  // ── 1. Query aggregato (con retry se i campi opzionali non sono supportati) ──
+
+  let aggregateRows       = null;
+  let hasNetQuantity      = false;
+  let hasAverageOrderValue = false;
+
+  const fullAggQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders, net_quantity, average_order_value SINCE ${since} UNTIL ${until}`;
+  try {
+    aggregateRows        = await executeShopifyQLQuery(shop, accessToken, fullAggQuery, 'sales_aggregate_full');
+    hasNetQuantity       = true;
+    hasAverageOrderValue = true;
+  } catch (fullErr) {
+    if (fullErr.code === 'SHOPIFY_QL_PARSE_ERROR') {
+      // Retry con solo i campi garantiti
+      const minAggQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders SINCE ${since} UNTIL ${until}`;
+      aggregateRows = await executeShopifyQLQuery(shop, accessToken, minAggQuery, 'sales_aggregate_minimal');
+      // hasNetQuantity e hasAverageOrderValue rimangono false
+    } else {
+      throw fullErr;
+    }
+  }
+
+  // ── 2. Customer type (non critica: errori silenziati) ─────────────────────
+
+  let customerTypeRows = null;
+  try {
+    const ctQuery = `FROM sales SHOW orders, customers GROUP BY customer_type SINCE ${since} UNTIL ${until}`;
+    customerTypeRows = await executeShopifyQLQuery(shop, accessToken, ctQuery, 'customer_type');
+  } catch {
+    customerTypeRows = null;
+  }
+
+  // ── 3. Timeseries giornaliero per sparkline (non critica) ─────────────────
+
+  let timeseriesRows = null;
+  try {
+    const tsQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders TIMESERIES day SINCE ${since} UNTIL ${until}`;
+    timeseriesRows = await executeShopifyQLQuery(shop, accessToken, tsQuery, 'sales_timeseries');
+  } catch {
+    timeseriesRows = null;
+  }
+
+  return {
+    aggregateRows,
+    customerTypeRows,
+    timeseriesRows,
+    hasNetQuantity,
+    hasAverageOrderValue,
+    meta: { startDate, endDate, fetchedAt: new Date() },
+  };
+}
+
+// ── Admin API (ordini) ────────────────────────────────────────────────────────
+
 export async function fetchRawShopifyData({ clientId, range, startDate, endDate }) {
   const { shop, accessToken } = await resolveShopifyIntegration(clientId);
 

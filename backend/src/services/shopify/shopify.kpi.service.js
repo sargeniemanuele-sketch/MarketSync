@@ -408,3 +408,214 @@ export function compareShopifyKpis(currentSummary, previousSummary) {
     SHOPIFY_COMPARISON_KEYS
   );
 }
+
+// ── ShopifyQL path ────────────────────────────────────────────────────────────
+//
+// Queste funzioni processano il risultato di fetchShopifySalesReportQL e
+// producono lo stesso contratto di computeShopifyKpis:
+//   { summary, seriesByMetricKey, meta }
+//
+// Differenze rispetto al path Admin API:
+//   - meta.apiSource === 'shopifyql_report'
+//   - meta.isOrderBasedFallback === false
+//   - refundedAmount non è presente in summary (ShopifyQL non espone il dato
+//     come importo cash rimborsato → not_available, card mostra N/D)
+//   - unitsSold usa net_quantity da ShopifyQL (netto resi) se disponibile
+//   - currency null → il card builder usa CURRENCY_DEFAULT
+
+function parseQLDecimal(value) {
+  if (value == null || value === '') return null;
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseQLInt(value) {
+  if (value == null || value === '') return null;
+  const n = parseInt(value, 10);
+  return Number.isInteger(n) ? n : null;
+}
+
+function buildShopifyQLSeriesByMetricKey(timeseriesRows) {
+  if (!Array.isArray(timeseriesRows) || timeseriesRows.length === 0) return {};
+
+  const series = {
+    [SHOPIFY_KPI_KEYS.totalSales]: [],
+    [SHOPIFY_KPI_KEYS.grossSales]: [],
+    [SHOPIFY_KPI_KEYS.discounts]:  [],
+    [SHOPIFY_KPI_KEYS.returns]:    [],
+    [SHOPIFY_KPI_KEYS.netSales]:   [],
+    [SHOPIFY_KPI_KEYS.shipping]:   [],
+    [SHOPIFY_KPI_KEYS.taxes]:      [],
+    [SHOPIFY_KPI_KEYS.orders]:     [],
+  };
+
+  for (const row of timeseriesRows) {
+    // TIMESERIES day produce una colonna 'day' con formato YYYY-MM-DD
+    const date = row.day ? String(row.day).slice(0, 10) : null;
+    if (!date) continue;
+
+    const push = (key, rawVal, parser) => {
+      const v = parser(rawVal);
+      if (v != null) series[key].push({ date, value: round2(v) });
+    };
+
+    push(SHOPIFY_KPI_KEYS.totalSales, row.total_sales, parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.grossSales, row.gross_sales, parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.discounts,  row.discounts,   parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.returns,    row.returns,     parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.netSales,   row.net_sales,   parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.shipping,   row.shipping,    parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.taxes,      row.taxes,       parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.orders,     row.orders,      parseQLInt);
+  }
+
+  // Ordina per data e rimuove chiavi con serie vuote
+  for (const key of Object.keys(series)) {
+    series[key].sort((a, b) => a.date.localeCompare(b.date));
+    if (series[key].length === 0) delete series[key];
+  }
+
+  return series;
+}
+
+/**
+ * Calcola i KPI Shopify dal risultato di fetchShopifySalesReportQL.
+ *
+ * Produce lo stesso contratto di computeShopifyKpis:
+ *   { summary, seriesByMetricKey, meta }
+ *
+ * Metriche con fonte ShopifyQL diretta:
+ *   total_sales, gross_sales, discounts, returns, net_sales, shipping,
+ *   taxes, orders, average_order_value (formula fallback se non esposta),
+ *   net_quantity → units_sold (se disponibile), new/returning customer
+ *   metrics (se customer_type disponibile).
+ *
+ * Metriche not_available (omesse da summary):
+ *   refunded_amount — l'importo cash rimborsato non è in FROM sales.
+ *   units_sold      — se net_quantity non era supportato da ShopifyQL.
+ *   customer metrics — se customer_type non disponibile (parse error).
+ *
+ * @param {object} qlResult  Risultato di fetchShopifySalesReportQL
+ * @param {object} params    { range, startDate, endDate }
+ */
+export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }) {
+  const {
+    aggregateRows,
+    customerTypeRows,
+    timeseriesRows,
+    hasNetQuantity,
+    hasAverageOrderValue,
+    meta: fetchMeta,
+  } = qlResult;
+
+  const agg = Array.isArray(aggregateRows) && aggregateRows.length > 0 ? aggregateRows[0] : null;
+  if (!agg) {
+    throw Object.assign(
+      new Error('ShopifyQL ha restituito dati aggregati vuoti.'),
+      { code: 'SHOPIFY_API_ERROR', statusCode: 502 }
+    );
+  }
+
+  // ── Metriche aggregate ────────────────────────────────────────────────────
+
+  const grossSales = parseQLDecimal(agg.gross_sales) ?? 0;
+  const discounts  = parseQLDecimal(agg.discounts)   ?? 0;
+  const returns    = parseQLDecimal(agg.returns)     ?? 0;
+  const netSales   = parseQLDecimal(agg.net_sales)   ?? (grossSales - discounts - returns);
+  const shipping   = parseQLDecimal(agg.shipping)    ?? 0;
+  const taxes      = parseQLDecimal(agg.taxes)       ?? 0;
+  const totalSales = parseQLDecimal(agg.total_sales) ?? (netSales + shipping + taxes);
+  const orders     = parseQLInt(agg.orders)          ?? 0;
+
+  // AOV: usa il valore QL se disponibile, altrimenti calcola con formula ufficiale.
+  let averageOrderValue;
+  if (hasAverageOrderValue && agg.average_order_value != null) {
+    averageOrderValue = parseQLDecimal(agg.average_order_value) ?? 0;
+  } else {
+    averageOrderValue = orders > 0 ? (grossSales - discounts) / orders : 0;
+  }
+
+  // units_sold: usa net_quantity da ShopifyQL (netto resi) se disponibile.
+  // net_quantity è il nome ufficiale nel dataset FROM sales.
+  let unitsSold = null;
+  if (hasNetQuantity && agg.net_quantity != null) {
+    unitsSold = parseQLInt(agg.net_quantity);
+  }
+
+  // ── Customer type ─────────────────────────────────────────────────────────
+  // GROUP BY customer_type restituisce 'first_time' e 'returning'.
+
+  let newCustomers            = undefined;
+  let returningCustomers      = undefined;
+  let newCustomerOrders       = undefined;
+  let returningCustomerOrders = undefined;
+
+  if (Array.isArray(customerTypeRows) && customerTypeRows.length > 0) {
+    for (const row of customerTypeRows) {
+      const ct = String(row.customer_type ?? '').toLowerCase();
+      if (ct === 'first_time') {
+        newCustomerOrders = parseQLInt(row.orders)    ?? 0;
+        newCustomers      = parseQLInt(row.customers) ?? 0;
+      } else if (ct === 'returning') {
+        returningCustomerOrders = parseQLInt(row.orders)    ?? 0;
+        returningCustomers      = parseQLInt(row.customers) ?? 0;
+      }
+    }
+  }
+
+  // ── Summary ───────────────────────────────────────────────────────────────
+  // refundedAmount omesso: non esiste in FROM sales come importo cash.
+  // unitsSold omesso se net_quantity non era supportato.
+  // Customer metrics omesse se customer_type non disponibile.
+
+  const officialSummary = {
+    [SHOPIFY_KPI_KEYS.totalSales]:        round2(totalSales),
+    [SHOPIFY_KPI_KEYS.grossSales]:        round2(grossSales),
+    [SHOPIFY_KPI_KEYS.discounts]:         round2(discounts),
+    [SHOPIFY_KPI_KEYS.returns]:           round2(returns),
+    [SHOPIFY_KPI_KEYS.netSales]:          round2(netSales),
+    [SHOPIFY_KPI_KEYS.shipping]:          round2(shipping),
+    [SHOPIFY_KPI_KEYS.taxes]:             round2(taxes),
+    [SHOPIFY_KPI_KEYS.orders]:            orders,
+    [SHOPIFY_KPI_KEYS.averageOrderValue]: round2(averageOrderValue),
+    ...(unitsSold != null ? { [SHOPIFY_KPI_KEYS.unitsSold]: unitsSold } : {}),
+    ...(newCustomers != null            ? { [SHOPIFY_KPI_KEYS.newCustomers]: newCustomers }                       : {}),
+    ...(returningCustomers != null      ? { [SHOPIFY_KPI_KEYS.returningCustomers]: returningCustomers }           : {}),
+    ...(newCustomerOrders != null       ? { [SHOPIFY_KPI_KEYS.newCustomerOrders]: newCustomerOrders }             : {}),
+    ...(returningCustomerOrders != null ? { [SHOPIFY_KPI_KEYS.returningCustomerOrders]: returningCustomerOrders } : {}),
+    // shopify_refunded_amount: non incluso → card builder lo marca not_available
+  };
+
+  const seriesByMetricKey = buildShopifyQLSeriesByMetricKey(timeseriesRows);
+
+  const hasCustomerType = Array.isArray(customerTypeRows) && customerTypeRows.length > 0;
+  const hasTimeseries   = Array.isArray(timeseriesRows)   && timeseriesRows.length   > 0;
+
+  return {
+    summary: withLegacyAliases(officialSummary),
+    seriesByMetricKey,
+    meta: {
+      currency:     null,
+      mixedCurrency: false,
+      orderCount:   orders,
+      apiSource:    'shopifyql_report',
+      range,
+      startDate,
+      endDate,
+      fetchedAt:              fetchMeta?.fetchedAt ?? null,
+      truncated:              false,
+      pagesFetched:           null,
+      isPartialData:          false,
+      isOrderBasedFallback:   false,
+      shopifyqlAvailable:     true,
+      hasNetQuantityFromQL:   hasNetQuantity,
+      hasAverageOrderValueFromQL: hasAverageOrderValue,
+      hasCustomerTypeFromQL:  hasCustomerType,
+      hasTimeseriesFromQL:    hasTimeseries,
+      // refundedAmount non disponibile da ShopifyQL:
+      // il card builder lo marca not_available automaticamente
+      // perché la chiave è assente da summary.
+      refundedAmountSource:  'not_available',
+    },
+  };
+}
