@@ -113,6 +113,14 @@ function collectProviderWarnings(provider, kpiResult) {
   const warnings = [];
   if (kpiResult?.meta?.truncated) warnings.push(buildTruncatedDataWarning(provider));
   if (provider === 'shopify' && kpiResult?.meta?.mixedCurrency) warnings.push(buildShopifyMixedCurrencyWarning());
+  if (provider === 'shopify' && kpiResult?.meta?.isPartialData) {
+    warnings.push({
+      code:    'SHOPIFY_PARTIAL_DATA',
+      provider: 'shopify',
+      scope:    'shopify',
+      message:  'Alcune metriche Shopify sono parziali perché i dati avanzati su clienti, resi o rimborsi non sono disponibili con gli scope correnti.',
+    });
+  }
   if (kpiResult?.meta?.comparison?.previous?.error) warnings.push(buildComparisonFailedWarning(provider));
   return warnings;
 }

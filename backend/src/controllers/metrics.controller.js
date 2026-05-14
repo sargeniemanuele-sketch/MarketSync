@@ -27,6 +27,9 @@ const reauthCodes = new Set([
   'GOOGLE_ADS_AUTH_ERROR',
   'META_REAUTH_REQUIRED',
   'SHOPIFY_REAUTH_REQUIRED',
+  // scope mancanti: il fallback minimale viene tentato prima, ma se propaga
+  // significa che entrambe le query sono fallite → l'utente deve riconfigurare l'app
+  'SHOPIFY_SCOPE_OR_ACCESS_DENIED',
 ]);
 
 async function resolveOwnedMetricsParams(req) {
@@ -184,6 +187,15 @@ export const getShopifyMetrics = asyncHandler(async (req, res) => {
   });
   if (result?.summary) {
     const warnings = [...(result.warnings ?? [])];
+
+    if (result.meta?.isPartialData) {
+      warnings.push({
+        code:     'SHOPIFY_PARTIAL_DATA',
+        provider: 'shopify',
+        scope:    'shopify',
+        message:  'Alcune metriche Shopify sono parziali perché i dati avanzati su clienti, resi o rimborsi non sono disponibili con gli scope correnti.',
+      });
+    }
 
     if (result.meta?.truncated) {
       warnings.push({

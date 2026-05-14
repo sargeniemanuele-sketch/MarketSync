@@ -16,6 +16,18 @@ export const SHOPIFY_COMPARISON_KEYS = Object.freeze([
   ...SHOPIFY_KPI_DEFINITIONS.map((definition) => definition.legacyKey).filter(Boolean),
 ]);
 
+// KPI che richiedono dati non presenti nella query minimale (customer, refunds, transactions).
+// Quando isPartialData=true questi vengono omessi dal summary e dalla seriesByMetricKey
+// così il card builder li marca `availability.status: not_available` anziché mostrarli a 0.
+const PARTIAL_DATA_UNAVAILABLE_KEYS = Object.freeze(new Set([
+  SHOPIFY_KPI_KEYS.returns,
+  SHOPIFY_KPI_KEYS.refundedAmount,
+  SHOPIFY_KPI_KEYS.newCustomers,
+  SHOPIFY_KPI_KEYS.returningCustomers,
+  SHOPIFY_KPI_KEYS.newCustomerOrders,
+  SHOPIFY_KPI_KEYS.returningCustomerOrders,
+]));
+
 // ── Helper ────────────────────────────────────────────────────────────────────
 
 /** Arrotonda un numero a 2 decimali (precisione monetaria). */
@@ -29,6 +41,7 @@ function sumField(orders, accessor) {
 }
 
 function withLegacyAliases(officialSummary) {
+  // Non aggiungere alias per chiavi omesse dal summary (evita `key: undefined`)
   const aliases = Object.fromEntries(
     SHOPIFY_KPI_DEFINITIONS
       .filter((definition) => definition.legacyKey)
@@ -36,6 +49,7 @@ function withLegacyAliases(officialSummary) {
         definition.legacyKey,
         officialSummary[definition.internalKey],
       ])
+      .filter(([, value]) => value !== undefined)
   );
 
   return {
@@ -327,27 +341,39 @@ export function computeShopifyKpis(fetchResult) {
   const averageOrderValue = orderCount > 0 ? (grossSales - discounts) / orderCount : 0;
 
   // ── Risultato ─────────────────────────────────────────────────────────────
+  // Quando isPartialData=true i KPI che dipendono da customer/refunds/transactions
+  // vengono omessi: il card builder li marca `availability.status: not_available`
+  // anziché mostrare 0 come dato reale.
   const officialSummary = {
-    [SHOPIFY_KPI_KEYS.grossSales]:              round2(grossSales),
-    [SHOPIFY_KPI_KEYS.discounts]:               round2(discounts),
-    [SHOPIFY_KPI_KEYS.returns]:                 round2(returnsAmount),
-    [SHOPIFY_KPI_KEYS.netSales]:                round2(netSales),
-    [SHOPIFY_KPI_KEYS.shipping]:                round2(shipping),
-    [SHOPIFY_KPI_KEYS.taxes]:                   round2(taxes),
-    [SHOPIFY_KPI_KEYS.totalSales]:              round2(totalSales),
-    [SHOPIFY_KPI_KEYS.orders]:                  orderCount,
-    [SHOPIFY_KPI_KEYS.averageOrderValue]:       round2(averageOrderValue),
-    [SHOPIFY_KPI_KEYS.unitsSold]:               unitsSold,
-    [SHOPIFY_KPI_KEYS.newCustomers]:            newCustomerIds.size,
-    [SHOPIFY_KPI_KEYS.returningCustomers]:      returningCustomerIds.size,
-    [SHOPIFY_KPI_KEYS.newCustomerOrders]:       newOrders.length,
-    [SHOPIFY_KPI_KEYS.returningCustomerOrders]: returningOrders.length,
-    [SHOPIFY_KPI_KEYS.refundedAmount]:          round2(refundedAmount),
+    [SHOPIFY_KPI_KEYS.grossSales]:        round2(grossSales),
+    [SHOPIFY_KPI_KEYS.discounts]:         round2(discounts),
+    [SHOPIFY_KPI_KEYS.netSales]:          round2(netSales),
+    [SHOPIFY_KPI_KEYS.shipping]:          round2(shipping),
+    [SHOPIFY_KPI_KEYS.taxes]:             round2(taxes),
+    [SHOPIFY_KPI_KEYS.totalSales]:        round2(totalSales),
+    [SHOPIFY_KPI_KEYS.orders]:            orderCount,
+    [SHOPIFY_KPI_KEYS.averageOrderValue]: round2(averageOrderValue),
+    [SHOPIFY_KPI_KEYS.unitsSold]:         unitsSold,
+    ...(fetchMeta.isPartialData ? {} : {
+      [SHOPIFY_KPI_KEYS.returns]:                 round2(returnsAmount),
+      [SHOPIFY_KPI_KEYS.newCustomers]:            newCustomerIds.size,
+      [SHOPIFY_KPI_KEYS.returningCustomers]:      returningCustomerIds.size,
+      [SHOPIFY_KPI_KEYS.newCustomerOrders]:       newOrders.length,
+      [SHOPIFY_KPI_KEYS.returningCustomerOrders]: returningOrders.length,
+      [SHOPIFY_KPI_KEYS.refundedAmount]:          round2(refundedAmount),
+    }),
   };
+
+  const allSeries = buildShopifySeriesByMetricKey(orders, fetchMeta);
+  const seriesByMetricKey = fetchMeta.isPartialData
+    ? Object.fromEntries(
+        Object.entries(allSeries).filter(([key]) => !PARTIAL_DATA_UNAVAILABLE_KEYS.has(key))
+      )
+    : allSeries;
 
   return {
     summary: withLegacyAliases(officialSummary),
-    seriesByMetricKey: buildShopifySeriesByMetricKey(orders, fetchMeta),
+    seriesByMetricKey,
     meta: {
       currency,
       mixedCurrency,
@@ -366,6 +392,8 @@ export function computeShopifyKpis(fetchResult) {
       refundItemsTruncated:            fetchMeta.refundItemsTruncated         ?? false,
       // true se almeno un rimborso aveva >50 transazioni: refundedAmount può essere parziale.
       refundTransactionsTruncated:     fetchMeta.refundTransactionsTruncated  ?? false,
+      // true quando è stata usata la query minimale: customer/refunds/transactions non disponibili.
+      isPartialData:               fetchMeta.isPartialData                ?? false,
       hasUnknownCustomerSegments:  unknownSegment.length > 0,
       unknownCustomerSegmentCount: unknownSegment.length,
       customerSegmentAttributionMode: 'current_orders_count_proxy',

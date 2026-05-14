@@ -109,7 +109,9 @@ function sleep(ms) {
 //
 // Nota schema Admin API 2026-01:
 //   Refund.transactions → OrderTransactionConnection (richiede edges/node)
-//   Refund.orderAdjustments → [OrderAdjustment!]! (lista diretta, no edges)
+//   Refund.orderAdjustments → OrderAdjustmentConnection in 2026-01 (richiede edges/node).
+//   Rimosso dalla query: la deduction shipping-refund non è critica per MVP.
+//   sumRefundedShipping restituisce 0 quando assente → shipping = totalShippingPriceSet lordo.
 
 const ORDERS_GRAPHQL_QUERY = `
   query FetchOrders($first: Int!, $after: String, $query: String!) {
@@ -165,9 +167,45 @@ const ORDERS_GRAPHQL_QUERY = `
                 }
               }
             }
-            orderAdjustments {
-              kind
-              amountSet { shopMoney { amount } }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// ── Query GraphQL minimale (fallback scope limitati) ─────────────────────────
+//
+// Usata quando la query completa fallisce per ACCESS_DENIED / scope mancanti.
+// Non include customer, refunds, transactions, orderAdjustments.
+// Compatibile con il solo scope read_orders.
+// normalizeOrders gestisce già tutti i campi come opzionali.
+
+const ORDERS_GRAPHQL_QUERY_MINIMAL = `
+  query FetchOrders($first: Int!, $after: String, $query: String!) {
+    orders(first: $first, after: $after, query: $query, sortKey: PROCESSED_AT, reverse: false) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      edges {
+        node {
+          id
+          name
+          createdAt
+          processedAt
+          cancelledAt
+          currencyCode
+          displayFinancialStatus
+          subtotalPriceSet      { shopMoney { amount } }
+          totalPriceSet         { shopMoney { amount } }
+          totalTaxSet           { shopMoney { amount } }
+          totalDiscountsSet     { shopMoney { amount } }
+          totalShippingPriceSet { shopMoney { amount } }
+          lineItems(first: 250) {
+            pageInfo { hasNextPage }
+            edges {
+              node { quantity }
             }
           }
         }
@@ -175,6 +213,48 @@ const ORDERS_GRAPHQL_QUERY = `
     }
   }
 `;
+
+// ── Helpers diagnostica e classificazione errori GraphQL ──────────────────────
+
+/**
+ * Determina se un errore GraphQL Shopify è causato da scope o accesso negato.
+ * Copre sia errori di token invalido (ACCESS_DENIED) sia scope mancanti.
+ */
+function isShopifyScopeError(errorCode, errorMsg) {
+  const codeUpper = String(errorCode ?? '').toUpperCase();
+  const msgLower  = String(errorMsg  ?? '').toLowerCase();
+  return (
+    codeUpper === 'ACCESS_DENIED'           ||
+    msgLower.includes('access denied')      ||
+    msgLower.includes('required access')    ||
+    msgLower.includes('protected customer data') ||
+    msgLower.includes('scope')
+  );
+}
+
+/**
+ * Logga i dettagli di un errore GraphQL Shopify lato server.
+ * Non espone mai accessToken. Il dominio shop viene mascherato parzialmente.
+ * Questi dettagli non raggiungono mai il frontend.
+ */
+function logShopifyGraphQLError({ shop, errors, apiVersion }) {
+  if (!Array.isArray(errors) || errors.length === 0) return;
+  const firstError = errors[0];
+  const extensions = firstError?.extensions ?? {};
+  const shopMasked = typeof shop === 'string'
+    ? shop.replace(/^[^.]+/, '[store]')
+    : '[unknown]';
+  console.error('[shopify:graphql_error]', JSON.stringify({
+    provider:    'shopify',
+    apiVersion,
+    operation:   'FetchOrders',
+    message:     firstError?.message  ?? null,
+    code:        extensions?.code     ?? null,
+    path:        firstError?.path     ?? null,
+    errorCount:  errors.length,
+    shop:        shopMasked,
+  }));
+}
 
 // ── Fetch singola pagina ──────────────────────────────────────────────────────
 
@@ -204,7 +284,7 @@ const ORDERS_GRAPHQL_QUERY = `
  *   refundTransactionsTruncated: boolean,
  * }}
  */
-async function fetchOrdersGraphQL(shop, accessToken, { first, after, queryFilter }) {
+async function fetchOrdersGraphQL(shop, accessToken, { first, after, queryFilter }, graphqlQuery = ORDERS_GRAPHQL_QUERY) {
   const url       = buildShopifyGraphQLUrl(shop);
   const variables = { first, after: after ?? null, query: queryFilter };
   let attempt     = 0;
@@ -219,7 +299,7 @@ async function fetchOrdersGraphQL(shop, accessToken, { first, after, queryFilter
       response = await fetch(url, {
         method:  'POST',
         headers: buildShopifyHeaders(accessToken),
-        body:    JSON.stringify({ query: ORDERS_GRAPHQL_QUERY, variables }),
+        body:    JSON.stringify({ query: graphqlQuery, variables }),
         signal:  controller.signal,
       });
     } catch (err) {
@@ -309,15 +389,7 @@ async function fetchOrdersGraphQL(shop, accessToken, { first, after, queryFilter
       const errorCode   = extensions.code ?? '';
       const errorMsg    = String(firstError?.message ?? '').toLowerCase();
 
-      if (errorCode === 'ACCESS_DENIED' || errorMsg.includes('access denied')) {
-        throw new AppError(
-          'L\'autorizzazione Shopify non è più valida. Ricollega lo store.',
-          422,
-          'SHOPIFY_REAUTH_REQUIRED',
-          { scope: 'shopify', provider: 'shopify' }
-        );
-      }
-
+      // Errori THROTTLED: retry con backoff, nessun log (sono transitori)
       if (errorCode === 'THROTTLED') {
         if (attempt < SHOPIFY.MAX_RETRIES) {
           attempt++;
@@ -328,6 +400,25 @@ async function fetchOrdersGraphQL(shop, accessToken, { first, after, queryFilter
           'Shopify rate limit raggiunto — riprova tra qualche secondo.',
           429,
           'SHOPIFY_RATE_LIMITED',
+          { scope: 'shopify', provider: 'shopify' }
+        );
+      }
+
+      // Log diagnostico server-side per tutti gli errori non-transitori (Task 1)
+      // Non raggiunge mai il frontend.
+      logShopifyGraphQLError({
+        shop,
+        errors: body.errors,
+        apiVersion: env.shopify.apiVersion || SHOPIFY.API_VERSION,
+      });
+
+      // Errori scope / accesso negato: codice specifico per consentire il fallback
+      // alla query minimale nel chiamante (Task 2)
+      if (isShopifyScopeError(errorCode, errorMsg)) {
+        throw new AppError(
+          'Shopify ha negato l\'accesso ad alcuni dati richiesti. Verifica gli scope dell\'app e ricollega lo store.',
+          422,
+          'SHOPIFY_SCOPE_OR_ACCESS_DENIED',
           { scope: 'shopify', provider: 'shopify' }
         );
       }
@@ -400,7 +491,7 @@ async function fetchOrdersGraphQL(shop, accessToken, { first, after, queryFilter
  *   refundTransactionsTruncated: boolean,
  * }}
  */
-async function fetchAllOrders(shop, accessToken, { startDate, endDate }) {
+async function fetchAllOrders(shop, accessToken, { startDate, endDate }, graphqlQuery = ORDERS_GRAPHQL_QUERY) {
   const allOrders   = [];
   const queryFilter = buildOrdersQueryFilter(startDate, endDate);
 
@@ -416,7 +507,7 @@ async function fetchAllOrders(shop, accessToken, { startDate, endDate }) {
       first: SHOPIFY.ORDERS_PER_PAGE,
       after: endCursor,
       queryFilter,
-    });
+    }, graphqlQuery);
 
     allOrders.push(...result.orders);
     pagesFetched++;
@@ -483,6 +574,22 @@ export async function fetchRawShopifyData({ clientId, range, startDate, endDate 
   const start = Date.now();
 
   try {
+    // Task 3: prova prima con la query completa; se Shopify nega l'accesso per
+    // scope insufficienti, riprova con la query minimale compatibile read_orders.
+    let fetchedData;
+    let isPartialData = false;
+
+    try {
+      fetchedData = await fetchAllOrders(shop, accessToken, { startDate, endDate }, ORDERS_GRAPHQL_QUERY);
+    } catch (scopeErr) {
+      if (scopeErr instanceof AppError && scopeErr.code === 'SHOPIFY_SCOPE_OR_ACCESS_DENIED') {
+        fetchedData   = await fetchAllOrders(shop, accessToken, { startDate, endDate }, ORDERS_GRAPHQL_QUERY_MINIMAL);
+        isPartialData = true;
+      } else {
+        throw scopeErr;
+      }
+    }
+
     const {
       orders,
       pagesFetched,
@@ -490,7 +597,7 @@ export async function fetchRawShopifyData({ clientId, range, startDate, endDate 
       lineItemsTruncated,
       refundItemsTruncated,
       refundTransactionsTruncated,
-    } = await fetchAllOrders(shop, accessToken, { startDate, endDate });
+    } = fetchedData;
 
     const durationMs = Date.now() - start;
 
@@ -532,6 +639,9 @@ export async function fetchRawShopifyData({ clientId, range, startDate, endDate 
         // refundTransactionsTruncated: true se almeno un rimborso ha più di 50 transazioni.
         // In quel caso refundedAmount può essere parziale.
         refundTransactionsTruncated,
+        // isPartialData: true quando il fallback query minimale è stato usato.
+        // customer, refunds, transactions e orderAdjustments non sono disponibili.
+        isPartialData,
       },
     };
   } catch (err) {
