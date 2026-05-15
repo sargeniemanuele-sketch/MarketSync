@@ -24,9 +24,6 @@ const PROVIDER_CARD_DEFINITIONS = {
       { key: "shopify_units_sold", label: "Units sold", unit: "number" },
       { key: "shopify_new_customers", label: "New customers rate", unit: "percentage" },
       { key: "shopify_returning_customers", label: "Returning customers rate", unit: "percentage" },
-      { key: "shopify_new_customer_orders", label: "New customer orders", unit: "number" },
-      { key: "shopify_returning_customer_orders", label: "Returning customer orders", unit: "number" },
-      { key: "shopify_refunded_amount", label: "Refunded amount", unit: "currency" },
     ],
   },
   [PROVIDER_KEYS.meta_ads]: {

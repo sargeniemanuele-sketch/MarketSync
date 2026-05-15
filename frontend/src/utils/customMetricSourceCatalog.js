@@ -42,9 +42,6 @@ const SHOPIFY_SOURCE_METRICS = [
   ...withLegacy(PROVIDER_KEYS.shopify, "shopify_units_sold", "Units sold", "number", "Unita vendute.", ["units_sold"]),
   ...withLegacy(PROVIDER_KEYS.shopify, "shopify_new_customers", "New customers rate", "percentage", "Percentuale ordini da clienti first-time Shopify.", ["new_customers"]),
   ...withLegacy(PROVIDER_KEYS.shopify, "shopify_returning_customers", "Returning customers rate", "percentage", "Percentuale ordini da clienti ricorrenti Shopify.", ["returning_customers"]),
-  ...withLegacy(PROVIDER_KEYS.shopify, "shopify_new_customer_orders", "New customer orders", "number", "Ordini di nuovi clienti.", ["new_customer_orders"]),
-  ...withLegacy(PROVIDER_KEYS.shopify, "shopify_returning_customer_orders", "Returning customer orders", "number", "Ordini di clienti ricorrenti.", ["returning_customer_orders"]),
-  ...withLegacy(PROVIDER_KEYS.shopify, "shopify_refunded_amount", "Refunded amount", "currency", "Importo rimborsato.", ["refunded_amount"]),
 ];
 
 const META_ADS_SOURCE_METRICS = [

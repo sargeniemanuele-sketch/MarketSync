@@ -9,6 +9,7 @@ import { buildDailyDateKeys } from '../../utils/sparkline.js';
 import {
   SHOPIFY_KPI_DEFINITIONS,
   SHOPIFY_KPI_KEYS,
+  SHOPIFY_KPI_SCHEMA_VERSION,
 } from '../../contracts/metrics/shopify.kpi.map.js';
 
 export const SHOPIFY_COMPARISON_KEYS = Object.freeze([
@@ -335,6 +336,7 @@ export function computeShopifyKpis(fetchResult) {
       apiSource:            'calculated_from_orders',
       isOrderBasedFallback: true,
       shopifyqlAvailable:   false,
+      cacheSchemaVersion:   SHOPIFY_KPI_SCHEMA_VERSION,
       range:                fetchMeta.range,
       startDate:            fetchMeta.startDate,
       endDate:              fetchMeta.endDate,
@@ -409,16 +411,14 @@ function buildShopifyQLSeriesByMetricKey(timeseriesRows) {
       if (v != null) series[key].push({ date, value: round2(v) });
     };
 
-    push(SHOPIFY_KPI_KEYS.totalSales, row.total_sales,    parseQLDecimal);
-    push(SHOPIFY_KPI_KEYS.grossSales, row.gross_sales,    parseQLDecimal);
-    push(SHOPIFY_KPI_KEYS.discounts,  row.discounts,      parseQLDecimal);
-    // sales_reversals è il nome ShopifyQL aggiornato per returns
-    push(SHOPIFY_KPI_KEYS.returns,    row.sales_reversals, parseQLDecimal);
-    push(SHOPIFY_KPI_KEYS.netSales,   row.net_sales,      parseQLDecimal);
-    // shipping_charges è il nome ShopifyQL aggiornato per shipping
+    push(SHOPIFY_KPI_KEYS.totalSales, row.total_sales,      parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.grossSales, row.gross_sales,     parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.discounts,  row.discounts,       parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.returns,    row.returns,          parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.netSales,   row.net_sales,       parseQLDecimal);
     push(SHOPIFY_KPI_KEYS.shipping,   row.shipping_charges, parseQLDecimal);
-    push(SHOPIFY_KPI_KEYS.taxes,      row.taxes,          parseQLDecimal);
-    push(SHOPIFY_KPI_KEYS.orders,     row.orders,         parseQLInt);
+    push(SHOPIFY_KPI_KEYS.taxes,      row.taxes,           parseQLDecimal);
+    push(SHOPIFY_KPI_KEYS.orders,     row.orders,          parseQLInt);
   }
 
   // Ordina per data e rimuove chiavi con serie vuote
@@ -451,6 +451,8 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
     hasNetItemsSold,
     hasAverageOrderValue,
     hasReturningCustomerRate,
+    hasReturns        = false,
+    hasShipping       = false,
     diagnostics,
     meta: fetchMeta,
   } = qlResult;
@@ -465,19 +467,25 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
   const agg = totalsRow;
 
   // ── Metriche aggregate ────────────────────────────────────────────────────
-  // Nomi ShopifyQL aggiornati:
-  //   sales_reversals  → returns   (il campo 'returns' è deprecato)
-  //   shipping_charges → shipping
-  //   net_items_sold   → unitsSold
+  // Campi core (sempre presenti, in fullQuery e minQuery):
+  //   total_sales, orders, gross_sales, discounts, net_sales, taxes
+  // Campi opzionali (solo in fullQuery; se la full fallisce → hasReturns/hasShipping=false):
+  //   returns           → shopify_returns
+  //   shipping_charges  → shopify_shipping
+  //   net_items_sold, average_order_value, returning_customer_rate
 
-  const grossSales = parseQLDecimal(agg.gross_sales)    ?? 0;
-  const discounts  = parseQLDecimal(agg.discounts)      ?? 0;
-  const returns    = parseQLDecimal(agg.sales_reversals) ?? 0;
-  const netSales   = parseQLDecimal(agg.net_sales)      ?? (grossSales - discounts - returns);
-  const shipping   = parseQLDecimal(agg.shipping_charges) ?? 0;
-  const taxes      = parseQLDecimal(agg.taxes)          ?? 0;
-  const totalSales = parseQLDecimal(agg.total_sales)    ?? (netSales + shipping + taxes);
-  const orders     = parseQLInt(agg.orders)             ?? 0;
+  const grossSales = parseQLDecimal(agg.gross_sales) ?? 0;
+  const discounts  = parseQLDecimal(agg.discounts)   ?? 0;
+  const netSales   = parseQLDecimal(agg.net_sales)   ?? 0;
+  const taxes      = parseQLDecimal(agg.taxes)       ?? 0;
+  const totalSales = parseQLDecimal(agg.total_sales) ?? 0;
+  const orders     = parseQLInt(agg.orders)          ?? 0;
+
+  // returns: disponibile solo se la fullQuery ha incluso il campo 'returns'.
+  // Non usare 0 come fallback: se unavailable deve essere null/omesso nel summary.
+  const returnsVal  = hasReturns  ? (parseQLDecimal(agg.returns)          ?? null) : null;
+  // shipping_charges: disponibile solo se la fullQuery ha incluso il campo.
+  const shippingVal = hasShipping ? (parseQLDecimal(agg.shipping_charges)  ?? null) : null;
 
   // AOV: usa il valore QL se disponibile (non ricostruire da formula approssimata).
   let averageOrderValue = null;
@@ -510,20 +518,22 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
   }
 
   // ── Summary ───────────────────────────────────────────────────────────────
+  // Campi opzionali omessi (non inclusi come 0) se la fullQuery non era disponibile.
+  // Il card builder li marca not_available quando mancano dal summary.
 
   const officialSummary = {
-    [SHOPIFY_KPI_KEYS.totalSales]:        round2(totalSales),
-    [SHOPIFY_KPI_KEYS.grossSales]:        round2(grossSales),
-    [SHOPIFY_KPI_KEYS.discounts]:         round2(discounts),
-    [SHOPIFY_KPI_KEYS.returns]:           round2(returns),
-    [SHOPIFY_KPI_KEYS.netSales]:          round2(netSales),
-    [SHOPIFY_KPI_KEYS.shipping]:          round2(shipping),
-    [SHOPIFY_KPI_KEYS.taxes]:             round2(taxes),
-    [SHOPIFY_KPI_KEYS.orders]:            orders,
-    ...(averageOrderValue != null        ? { [SHOPIFY_KPI_KEYS.averageOrderValue]:    round2(averageOrderValue) }    : {}),
-    ...(unitsSold != null                ? { [SHOPIFY_KPI_KEYS.unitsSold]:            unitsSold }                    : {}),
-    ...(returningCustomersRate != null   ? { [SHOPIFY_KPI_KEYS.returningCustomers]:   returningCustomersRate }       : {}),
-    ...(newCustomersRate != null         ? { [SHOPIFY_KPI_KEYS.newCustomers]:         newCustomersRate }             : {}),
+    [SHOPIFY_KPI_KEYS.totalSales]:  round2(totalSales),
+    [SHOPIFY_KPI_KEYS.grossSales]:  round2(grossSales),
+    [SHOPIFY_KPI_KEYS.discounts]:   round2(discounts),
+    [SHOPIFY_KPI_KEYS.netSales]:    round2(netSales),
+    [SHOPIFY_KPI_KEYS.taxes]:       round2(taxes),
+    [SHOPIFY_KPI_KEYS.orders]:      orders,
+    ...(returnsVal != null          ? { [SHOPIFY_KPI_KEYS.returns]:            round2(returnsVal) }         : {}),
+    ...(shippingVal != null         ? { [SHOPIFY_KPI_KEYS.shipping]:           round2(shippingVal) }        : {}),
+    ...(averageOrderValue != null   ? { [SHOPIFY_KPI_KEYS.averageOrderValue]:  round2(averageOrderValue) }  : {}),
+    ...(unitsSold != null           ? { [SHOPIFY_KPI_KEYS.unitsSold]:          unitsSold }                  : {}),
+    ...(returningCustomersRate != null ? { [SHOPIFY_KPI_KEYS.returningCustomers]: returningCustomersRate }  : {}),
+    ...(newCustomersRate != null    ? { [SHOPIFY_KPI_KEYS.newCustomers]:       newCustomersRate }           : {}),
   };
 
   const seriesByMetricKey = buildShopifyQLSeriesByMetricKey(timeseriesRows);
@@ -546,6 +556,11 @@ export function computeShopifyKpisFromQL(qlResult, { range, startDate, endDate }
       shopifyqlRawTableShape:         diagnostics?.shopifyqlRawTableShape         ?? null,
       shopifyqlErrorCode:        null,
       shopifyqlErrorMessage:     null,
+      shopifyqlReturnsFieldUsed:     hasReturns ? 'returns' : null,
+      shopifyqlReturnsUnavailable:   !hasReturns,
+      shopifyqlShippingFieldUsed:    hasShipping ? 'shipping_charges' : null,
+      shopifyqlShippingUnavailable:  !hasShipping,
+      cacheSchemaVersion:            SHOPIFY_KPI_SCHEMA_VERSION,
       range,
       startDate,
       endDate,

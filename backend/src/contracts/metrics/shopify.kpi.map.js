@@ -6,6 +6,10 @@ export const SHOPIFY_SALES_REPORTS_URL =
 
 export const SHOPIFY_KPI_SOURCE = 'Shopify Analytics / Sales reports';
 
+// Versione schema KPI Shopify. Incrementare se cambia il mapping ShopifyQL
+// per invalidare automaticamente cache con payload basati su schema precedente.
+export const SHOPIFY_KPI_SCHEMA_VERSION = 'shopifyql-v2';
+
 export const SHOPIFY_KPI_KEYS = Object.freeze({
   grossSales: 'shopify_gross_sales',
   discounts: 'shopify_discounts',
@@ -242,7 +246,7 @@ export function buildShopifyCardDefinition(key) {
   } else if (isCustomerRate) {
     note = null;
   } else if (definition.sourceType !== 'official_field') {
-    note = 'Calcolato dai dati ordini Shopify se il report Analytics non e disponibile via API.';
+    note = 'Fonte primaria: Shopify Analytics (ShopifyQL). Stimato dagli ordini se ShopifyQL non è disponibile.';
   }
 
   return {

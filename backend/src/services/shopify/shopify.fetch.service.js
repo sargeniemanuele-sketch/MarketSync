@@ -538,14 +538,21 @@ async function fetchAllOrders(shop, accessToken, { startDate, endDate }, graphql
 // Query unica: TIMESERIES day WITH TOTALS — restituisce sia i valori aggregati
 // del periodo (riga TOTALS con day=null) sia la serie giornaliera (sparkline).
 //
-// Campi ShopifyQL con naming ufficiale aggiornato:
-//   sales_reversals    → returns (il campo 'returns' è deprecato in Shopify)
-//   shipping_charges   → shipping
-//   net_items_sold     → units sold (netto resi)
-//   returning_customer_rate → percentuale clienti ricorrenti
+// Campi ShopifyQL (Admin GraphQL 2026-01):
+//   returns            → shopify_returns    (campo ufficiale; 'sales_reversals' rimosso)
+//   shipping_charges   → shopify_shipping
+//   net_items_sold     → shopify_units_sold (solo in fullQuery)
+//   returning_customer_rate → shopify_returning_customers (solo in fullQuery)
 //
-// Se i campi opzionali causano parse error, si ritenta con query minimale.
-// Se read_reports manca, lancia SHOPIFY_REPORTS_ACCESS_REQUIRED.
+// Strategia a due livelli:
+//   fullQuery  — tutti i campi inclusi i campi opzionali
+//   minQuery   — solo i 6 campi core (total_sales, orders, gross_sales, discounts,
+//                net_sales, taxes); nessun campo che può causare Column Not Found.
+//
+// Se fullQuery lancia SHOPIFY_QL_PARSE_ERROR → retry con minQuery.
+// Se minQuery riesce → campi opzionali marcati unavailable (hasReturns=false ecc.).
+// Se anche minQuery fallisce → errore propagato, nessun fallback order-based.
+// Se read_reports manca → lancia SHOPIFY_REPORTS_ACCESS_REQUIRED.
 
 function formatShopifyQLDate(date) {
   const d = date instanceof Date ? date : new Date(date);
@@ -792,23 +799,26 @@ function splitTotalsAndTimeseries(rows) {
  *   - riga TOTALS (day=null): valori aggregati del periodo → usati per le card
  *   - righe day:              serie giornaliera → usata per le sparkline
  *
- * Campi ShopifyQL usati (mapping definitivo):
- *   sales_reversals   → shopify_returns
- *   shipping_charges  → shopify_shipping
- *   net_items_sold    → shopify_units_sold
- *   returning_customer_rate → shopify_returning_customers (percentuale)
+ * Campi ShopifyQL (Admin GraphQL 2026-01):
+ *   returns            → shopify_returns    (campo ufficiale; usa il minQuery core se Column Not Found)
+ *   shipping_charges   → shopify_shipping
+ *   net_items_sold     → shopify_units_sold (solo fullQuery)
+ *   returning_customer_rate → shopify_returning_customers (solo fullQuery)
  *
- * Se i campi opzionali (net_items_sold, average_order_value,
- * returning_customer_rate) causano parse error, si ritenta con query minimale.
+ * Se fullQuery lancia SHOPIFY_QL_PARSE_ERROR → retry con minQuery (campi core only).
+ * Se minQuery riesce → hasReturns=false, hasShipping=false, hasNetItemsSold=false ecc.
+ * Se anche minQuery fallisce → errore propagato (nessun fallback order-based da qui).
  *
  * @returns {{
- *   totalsRow:              object | null,
- *   timeseriesRows:         object[],
- *   hasNetItemsSold:        boolean,
- *   hasAverageOrderValue:   boolean,
+ *   totalsRow:                object | null,
+ *   timeseriesRows:           object[],
+ *   hasNetItemsSold:          boolean,
+ *   hasAverageOrderValue:     boolean,
  *   hasReturningCustomerRate: boolean,
- *   diagnostics:            object,
- *   meta:                   { startDate: Date, endDate: Date, fetchedAt: Date }
+ *   hasReturns:               boolean,
+ *   hasShipping:              boolean,
+ *   diagnostics:              object,
+ *   meta:                     { startDate: Date, endDate: Date, fetchedAt: Date }
  * }}
  */
 export async function fetchShopifySalesReportQL({ clientId, startDate, endDate }) {
@@ -817,32 +827,35 @@ export async function fetchShopifySalesReportQL({ clientId, startDate, endDate }
   const since = formatShopifyQLDate(startDate);
   const until  = formatShopifyQLDate(endDate);
 
-  // ── Query unica TIMESERIES day WITH TOTALS ────────────────────────────────
-  // Campi garantiti: metriche finanziarie con nomi ShopifyQL aggiornati.
-  // Campi opzionali: net_items_sold, average_order_value, returning_customer_rate
-  // (retry senza di loro se il parser ShopifyQL li rifiuta).
-
-  const fullQuery = `FROM sales SHOW total_sales, orders, average_order_value, gross_sales, discounts, sales_reversals, net_sales, shipping_charges, taxes, net_items_sold, returning_customer_rate TIMESERIES day WITH TOTALS, CURRENCY 'EUR' SINCE ${since} UNTIL ${until} ORDER BY day ASC LIMIT 1000`;
-  const minQuery  = `FROM sales SHOW total_sales, orders, gross_sales, discounts, sales_reversals, net_sales, shipping_charges, taxes TIMESERIES day WITH TOTALS, CURRENCY 'EUR' SINCE ${since} UNTIL ${until} ORDER BY day ASC LIMIT 1000`;
+  // fullQuery: tutti i campi inclusi quelli opzionali.
+  // minQuery: solo i 6 campi core universalmente disponibili — nessun campo
+  // che possa causare Column Not Found (no returns, no shipping_charges).
+  const fullQuery = `FROM sales SHOW total_sales, orders, average_order_value, gross_sales, discounts, returns, net_sales, shipping_charges, taxes, net_items_sold, returning_customer_rate TIMESERIES day WITH TOTALS, CURRENCY 'EUR' SINCE ${since} UNTIL ${until} ORDER BY day ASC LIMIT 1000`;
+  const minQuery  = `FROM sales SHOW total_sales, orders, gross_sales, discounts, net_sales, taxes TIMESERIES day WITH TOTALS, CURRENCY 'EUR' SINCE ${since} UNTIL ${until} ORDER BY day ASC LIMIT 1000`;
 
   let allRows                        = null;
   let hasNetItemsSold                = false;
   let hasAverageOrderValue           = false;
   let hasReturningCustomerRate       = false;
+  let hasReturns                     = false;
+  let hasShipping                    = false;
   let shopifyqlQueryType             = 'sales_timeseries_full';
   let shopifyqlMinimalQueryAttempted = false;
 
   try {
-    allRows              = await executeShopifyQLQuery(shop, accessToken, fullQuery, 'sales_timeseries_full');
-    hasNetItemsSold      = true;
-    hasAverageOrderValue = true;
+    allRows                  = await executeShopifyQLQuery(shop, accessToken, fullQuery, 'sales_timeseries_full');
+    hasNetItemsSold          = true;
+    hasAverageOrderValue     = true;
     hasReturningCustomerRate = true;
+    hasReturns               = true;
+    hasShipping              = true;
   } catch (fullErr) {
     if (fullErr.code === 'SHOPIFY_QL_PARSE_ERROR') {
       shopifyqlMinimalQueryAttempted = true;
       shopifyqlQueryType = 'sales_timeseries_minimal';
+      // minQuery non contiene campi opzionali → non può fallire per Column Not Found
       allRows = await executeShopifyQLQuery(shop, accessToken, minQuery, 'sales_timeseries_minimal');
-      // campi opzionali non disponibili → not_available nel summary
+      // tutti i campi opzionali unavailable → not_available nelle card
     } else {
       throw fullErr;
     }
@@ -865,6 +878,8 @@ export async function fetchShopifySalesReportQL({ clientId, startDate, endDate }
     hasNetItemsSold,
     hasAverageOrderValue,
     hasReturningCustomerRate,
+    hasReturns,
+    hasShipping,
     diagnostics: {
       shopifyqlAttempted:             true,
       shopifyqlFullQueryAttempted:    true,

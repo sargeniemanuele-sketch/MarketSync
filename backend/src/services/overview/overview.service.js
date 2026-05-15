@@ -14,6 +14,7 @@ import {
   computeShopifyKpis,
   computeShopifyKpisFromQL,
 } from '../shopify/shopify.kpi.service.js';
+import { SHOPIFY_KPI_SCHEMA_VERSION } from '../../contracts/metrics/shopify.kpi.map.js';
 import { fetchRawMetaAdsData } from '../metaAds/metaAds.fetch.service.js';
 import { normalizeMetaAdsInsights } from '../metaAds/metaAds.normalize.service.js';
 import {
@@ -360,8 +361,12 @@ async function withMetricCache({
  *   meta.apiSource = 'shopifyql'
  *
  * Fallback Admin API (ordini): fetchRawShopifyData → computeShopifyKpis
- *   Usato se ShopifyQL lancia SHOPIFY_REPORTS_ACCESS_REQUIRED o SHOPIFY_QL_PARSE_ERROR.
+ *   Usato SOLO se ShopifyQL lancia SHOPIFY_REPORTS_ACCESS_REQUIRED (scope mancante).
  *   meta.isOrderBasedFallback = true
+ *
+ * IMPORTANTE: SHOPIFY_QL_PARSE_ERROR non triggera il fallback order-based.
+ * fetchShopifySalesReportQL gestisce internamente il retry con minQuery; se anche
+ * minQuery fallisce l'errore propaga senza dati fake dagli ordini.
  */
 async function runShopifyLive(params) {
   try {
@@ -369,13 +374,9 @@ async function runShopifyLive(params) {
     return computeShopifyKpisFromQL(qlResult, params);
   } catch (qlErr) {
     const isAccessErr = qlErr?.code === 'SHOPIFY_REPORTS_ACCESS_REQUIRED';
-    const isParseErr  = qlErr?.code === 'SHOPIFY_QL_PARSE_ERROR';
 
-    if (isAccessErr || isParseErr) {
-      // Recupera gli scope concessi per diagnostica (best-effort, fire-and-forget style)
-      const grantedScopes = isAccessErr
-        ? await fetchShopifyGrantedScopes(params.clientId).catch(() => null)
-        : null;
+    if (isAccessErr) {
+      const grantedScopes = await fetchShopifyGrantedScopes(params.clientId).catch(() => null);
 
       const rawResult = await fetchRawShopifyData(params);
       const kpiResult = computeShopifyKpis(rawResult);
@@ -386,12 +387,11 @@ async function runShopifyLive(params) {
           isOrderBasedFallback:    true,
           shopifyqlAvailable:      false,
           shopifyqlAttempted:      true,
-          shopifyqlAccessRequired: isAccessErr,
+          shopifyqlAccessRequired: true,
           shopifyqlErrorCode:      qlErr?.code ?? null,
-          shopifyqlErrorMessage:   isAccessErr
-            ? 'scope read_reports non concesso o access policy Shopify'
-            : 'parse error query ShopifyQL dopo retry minimal',
+          shopifyqlErrorMessage:   'scope read_reports non concesso o access policy Shopify',
           ...(grantedScopes != null ? { shopifyGrantedScopes: grantedScopes } : {}),
+          cacheSchemaVersion:      SHOPIFY_KPI_SCHEMA_VERSION,
         },
       };
     }
@@ -421,6 +421,8 @@ export async function getShopifyKpiResult({ clientId, range, startDate, endDate,
     endDate,
     ttlMs: METRIC_CACHE.SHOPIFY_TTL_MS,
     bypassCache: Boolean(forceRefresh),
+    // Invalida cache prodotta con schema precedente (order-based o mapping diverso).
+    isCacheValid: (cached) => cached?.meta?.cacheSchemaVersion === SHOPIFY_KPI_SCHEMA_VERSION,
     buildLive: () => runShopifyLive({ clientId, range, startDate, endDate }),
   });
 }
