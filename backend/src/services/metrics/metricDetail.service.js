@@ -64,9 +64,8 @@ const ADDITIVE_SERIES_KEYS = Object.freeze(new Set([
   'shopify_total_sales',
   'shopify_orders',
   'shopify_units_sold',
-  'shopify_new_customer_orders',
-  'shopify_returning_customer_orders',
-  'shopify_refunded_amount',
+  'shopify_new_customers',
+  'shopify_returning_customers',
   'meta_amount_spent',
   'meta_impressions',
   'meta_clicks',
@@ -465,9 +464,6 @@ function createShopifyHourlyBucket(date, hour) {
     additionalFees: 0,
     orders: 0,
     unitsSold: 0,
-    refundedAmount: 0,
-    newCustomerIds: new Set(),
-    returningCustomerIds: new Set(),
     newCustomerOrders: 0,
     returningCustomerOrders: 0,
   };
@@ -480,22 +476,28 @@ function readShopifyHourlyValue(bucket, metricKey) {
     ? (bucket.grossSales - bucket.discounts) / bucket.orders
     : 0;
 
+  // Approssimazione order-based per percentuali customer rate (su ordini noti).
+  const knownOrders = bucket.newCustomerOrders + bucket.returningCustomerOrders;
+  const returningCustomersRate = knownOrders > 0
+    ? round2((bucket.returningCustomerOrders / knownOrders) * 100)
+    : null;
+  const newCustomersRate = returningCustomersRate != null
+    ? round2(100 - returningCustomersRate)
+    : null;
+
   const values = {
-    shopify_gross_sales: bucket.grossSales,
-    shopify_discounts: bucket.discounts,
-    shopify_returns: bucket.returnsAmount,
-    shopify_net_sales: netSales,
-    shopify_shipping: bucket.shipping,
-    shopify_taxes: bucket.taxes,
-    shopify_total_sales: totalSales,
-    shopify_orders: bucket.orders,
-    shopify_average_order_value: averageOrderValue,
-    shopify_units_sold: bucket.unitsSold,
-    shopify_new_customers: bucket.newCustomerIds.size,
-    shopify_returning_customers: bucket.returningCustomerIds.size,
-    shopify_new_customer_orders: bucket.newCustomerOrders,
-    shopify_returning_customer_orders: bucket.returningCustomerOrders,
-    shopify_refunded_amount: bucket.refundedAmount,
+    shopify_gross_sales:          bucket.grossSales,
+    shopify_discounts:            bucket.discounts,
+    shopify_returns:              bucket.returnsAmount,
+    shopify_net_sales:            netSales,
+    shopify_shipping:             bucket.shipping,
+    shopify_taxes:                bucket.taxes,
+    shopify_total_sales:          totalSales,
+    shopify_orders:               bucket.orders,
+    shopify_average_order_value:  averageOrderValue,
+    shopify_units_sold:           bucket.unitsSold,
+    shopify_new_customers:        newCustomersRate,
+    shopify_returning_customers:  returningCustomersRate,
   };
 
   return values[metricKey];
@@ -528,14 +530,11 @@ async function buildShopifyHourlySeries({ clientId, range, startDate, endDate, m
     bucket.additionalFees += order.additionalFees;
     bucket.orders += 1;
     bucket.unitsSold += order.unitsSold;
-    bucket.refundedAmount += order.refundedAmount;
 
     if (order.isReturningCustomer === false) {
       bucket.newCustomerOrders += 1;
-      if (order.customerId != null) bucket.newCustomerIds.add(order.customerId);
     } else if (order.isReturningCustomer === true) {
       bucket.returningCustomerOrders += 1;
-      if (order.customerId != null) bucket.returningCustomerIds.add(order.customerId);
     }
   }
 

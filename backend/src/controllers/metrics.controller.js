@@ -33,7 +33,7 @@ const reauthCodes = new Set([
 ]);
 
 async function resolveOwnedMetricsParams(req) {
-  const { clientId, range, startDate, endDate } = req.validated.query;
+  const { clientId, range, startDate, endDate, forceRefresh } = req.validated.query;
 
   await getClientById(req.user.id, clientId);
 
@@ -48,6 +48,7 @@ async function resolveOwnedMetricsParams(req) {
     range,
     startDate: resolved.startDate,
     endDate: resolved.endDate,
+    forceRefresh: Boolean(forceRefresh),
   };
 }
 
@@ -194,6 +195,20 @@ export const getShopifyMetrics = asyncHandler(async (req, res) => {
         provider: 'shopify',
         scope:    'shopify',
         message:  'Alcune metriche Shopify sono parziali perché i dati avanzati su clienti, resi o rimborsi non sono disponibili con gli scope correnti.',
+      });
+    }
+
+    if (
+      result.meta?.shopifyqlMinimalQueryAttempted &&
+      (result.meta?.hasAverageOrderValueFromQL === false ||
+       result.meta?.hasNetItemsSoldFromQL      === false ||
+       result.meta?.hasReturningCustomerRateFromQL === false)
+    ) {
+      warnings.push({
+        code:     'SHOPIFY_PARTIAL_DATA',
+        provider: 'shopify',
+        scope:    'shopify',
+        message:  'Alcune metriche Shopify (average order value, units sold, customer rate) non sono disponibili perché la query ShopifyQL estesa non è supportata dallo store. Vengono mostrati i dati parziali dalla query minimale.',
       });
     }
 

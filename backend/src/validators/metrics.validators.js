@@ -30,6 +30,11 @@ const metricsQueryBaseSchema = z.object({
   range: rangeEnum,
   startDate: isoDateSchema.optional(),
   endDate: isoDateSchema.optional(),
+  // forceRefresh=true bypassa la cache e forza una fetch live.
+  forceRefresh: z.preprocess(
+    (v) => v === 'true' || v === true,
+    z.boolean().default(false)
+  ).optional(),
 });
 
 function validateCustomRange(data, ctx) {

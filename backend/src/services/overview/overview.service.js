@@ -8,7 +8,7 @@ import {
   resolvePreviousRangeLabel,
   toAppDateString,
 } from '../../utils/ranges.js';
-import { fetchRawShopifyData, fetchShopifySalesReportQL } from '../shopify/shopify.fetch.service.js';
+import { fetchRawShopifyData, fetchShopifySalesReportQL, fetchShopifyGrantedScopes } from '../shopify/shopify.fetch.service.js';
 import {
   compareShopifyKpis,
   computeShopifyKpis,
@@ -120,6 +120,20 @@ function collectProviderWarnings(provider, kpiResult) {
       provider: 'shopify',
       scope:    'shopify',
       message:  'Alcune metriche Shopify sono parziali perché i dati avanzati su clienti, resi o rimborsi non sono disponibili con gli scope correnti.',
+    });
+  }
+  if (
+    provider === 'shopify' &&
+    kpiResult?.meta?.shopifyqlMinimalQueryAttempted &&
+    (kpiResult?.meta?.hasAverageOrderValueFromQL === false ||
+     kpiResult?.meta?.hasNetItemsSoldFromQL      === false ||
+     kpiResult?.meta?.hasReturningCustomerRateFromQL === false)
+  ) {
+    warnings.push({
+      code:    'SHOPIFY_PARTIAL_DATA',
+      provider: 'shopify',
+      scope:    'shopify',
+      message:  'Alcune metriche Shopify (average order value, units sold, customer rate) non sono disponibili perché la query ShopifyQL estesa non è supportata dallo store. Vengono mostrati i dati parziali dalla query minimale.',
     });
   }
   if (provider === 'shopify' && kpiResult?.meta?.isOrderBasedFallback) {
@@ -311,10 +325,11 @@ async function withMetricCache({
   endDate,
   buildLive,
   ttlMs,
+  bypassCache = false,
 }) {
   const cacheParams = { clientId, provider, metricKey, range, startDate, endDate };
 
-  const { data, meta, source } = await resolveWithCache({ cacheParams, buildLive, ttlMs });
+  const { data, meta, source } = await resolveWithCache({ cacheParams, buildLive, ttlMs, bypassCache });
 
   if (source === 'cache' || source === 'stale') {
     logSyncSuccess({
@@ -340,20 +355,13 @@ async function withMetricCache({
 /**
  * Pipeline live Shopify: tenta ShopifyQL (fonte primaria) con fallback Admin API.
  *
- * ── Fonte primaria ────────────────────────────────────────────────────────────
- * fetchShopifySalesReportQL → computeShopifyKpisFromQL
+ * Fonte primaria: fetchShopifySalesReportQL → computeShopifyKpisFromQL
  *   Richiede scope read_reports. Produce metriche identiche a Shopify Analytics.
- *   meta.apiSource = 'shopifyql_report'
+ *   meta.apiSource = 'shopifyql'
  *
- * ── Fallback Admin API (ordini) ───────────────────────────────────────────────
- * fetchRawShopifyData → computeShopifyKpis
- *   Usato se ShopifyQL lancia:
- *     - SHOPIFY_REPORTS_ACCESS_REQUIRED (read_reports mancante o access policy)
- *     - SHOPIFY_QL_PARSE_ERROR          (campo non supportato dopo retry)
+ * Fallback Admin API (ordini): fetchRawShopifyData → computeShopifyKpis
+ *   Usato se ShopifyQL lancia SHOPIFY_REPORTS_ACCESS_REQUIRED o SHOPIFY_QL_PARSE_ERROR.
  *   meta.isOrderBasedFallback = true
- *   meta.shopifyqlAccessRequired = true  (solo per ACCESS_REQUIRED)
- *   collectProviderWarnings emette SHOPIFY_ORDER_BASED_FALLBACK (e
- *   SHOPIFY_REPORTS_ACCESS_REQUIRED se il problema è l'accesso).
  */
 async function runShopifyLive(params) {
   try {
@@ -364,15 +372,26 @@ async function runShopifyLive(params) {
     const isParseErr  = qlErr?.code === 'SHOPIFY_QL_PARSE_ERROR';
 
     if (isAccessErr || isParseErr) {
+      // Recupera gli scope concessi per diagnostica (best-effort, fire-and-forget style)
+      const grantedScopes = isAccessErr
+        ? await fetchShopifyGrantedScopes(params.clientId).catch(() => null)
+        : null;
+
       const rawResult = await fetchRawShopifyData(params);
       const kpiResult = computeShopifyKpis(rawResult);
       return {
         ...kpiResult,
         meta: {
           ...kpiResult.meta,
-          isOrderBasedFallback:   true,
-          shopifyqlAvailable:     false,
+          isOrderBasedFallback:    true,
+          shopifyqlAvailable:      false,
+          shopifyqlAttempted:      true,
           shopifyqlAccessRequired: isAccessErr,
+          shopifyqlErrorCode:      qlErr?.code ?? null,
+          shopifyqlErrorMessage:   isAccessErr
+            ? 'scope read_reports non concesso o access policy Shopify'
+            : 'parse error query ShopifyQL dopo retry minimal',
+          ...(grantedScopes != null ? { shopifyGrantedScopes: grantedScopes } : {}),
         },
       };
     }
@@ -393,7 +412,7 @@ async function runGoogleAdsLive(params) {
   return computeGoogleAdsKpis(normalized);
 }
 
-export async function getShopifyKpiResult({ clientId, range, startDate, endDate }) {
+export async function getShopifyKpiResult({ clientId, range, startDate, endDate, forceRefresh = false }) {
   return withMetricCache({
     clientId,
     provider: 'shopify',
@@ -401,6 +420,7 @@ export async function getShopifyKpiResult({ clientId, range, startDate, endDate 
     startDate,
     endDate,
     ttlMs: METRIC_CACHE.SHOPIFY_TTL_MS,
+    bypassCache: Boolean(forceRefresh),
     buildLive: () => runShopifyLive({ clientId, range, startDate, endDate }),
   });
 }
@@ -438,6 +458,7 @@ async function getProviderKpiResultWithComparison({
   endDate,
   getKpiResultForRange,
   compareSummaries,
+  forceRefresh = false,
 }) {
   const currentDates = assertDateInput(startDate, endDate);
   const previousDates = resolvePreviousMetricsRange(currentDates);
@@ -448,6 +469,7 @@ async function getProviderKpiResultWithComparison({
     range,
     startDate: currentDates.startDate,
     endDate: currentDates.endDate,
+    forceRefresh,
   });
 
   let previousResult;
@@ -479,9 +501,10 @@ async function getProviderKpiResultWithComparison({
   });
 }
 
-export async function getShopifyKpiResultWithComparison(params) {
+export async function getShopifyKpiResultWithComparison({ forceRefresh = false, ...params }) {
   return getProviderKpiResultWithComparison({
     ...params,
+    forceRefresh,
     getKpiResultForRange: getShopifyKpiResult,
     compareSummaries: compareShopifyKpis,
   });

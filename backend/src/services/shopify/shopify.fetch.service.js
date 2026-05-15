@@ -535,19 +535,17 @@ async function fetchAllOrders(shop, accessToken, { startDate, endDate }, graphql
 // Usa shopifyqlQuery (GraphQL Admin API) come fonte primaria per le metriche
 // sales. Richiede lo scope read_reports sul token.
 //
-// La query ShopifyQL usa SINCE/UNTIL con formato YYYY-MM-DD.
-// UNTIL è inclusivo e corrisponde al giorno finale del range.
+// Query unica: TIMESERIES day WITH TOTALS — restituisce sia i valori aggregati
+// del periodo (riga TOTALS con day=null) sia la serie giornaliera (sparkline).
 //
-// Tre query parallele:
-//   1. Aggregato:      SHOW total_sales, gross_sales, discounts, returns,
-//                           net_sales, shipping, taxes, orders, net_quantity,
-//                           average_order_value
-//   2. Customer type:  SHOW orders, customers GROUP BY customer_type
-//   3. Timeseries:     TIMESERIES day per le sparkline
+// Campi ShopifyQL con naming ufficiale aggiornato:
+//   sales_reversals    → returns (il campo 'returns' è deprecato in Shopify)
+//   shipping_charges   → shipping
+//   net_items_sold     → units sold (netto resi)
+//   returning_customer_rate → percentuale clienti ricorrenti
 //
-// Se net_quantity o average_order_value non sono supportati, vengono esclusi
-// con un retry automatico (SHOPIFY_QL_PARSE_ERROR).
-// Se read_reports manca, lancia SHOPIFY_REPORTS_SCOPE_REQUIRED.
+// Se i campi opzionali causano parse error, si ritenta con query minimale.
+// Se read_reports manca, lancia SHOPIFY_REPORTS_ACCESS_REQUIRED.
 
 function formatShopifyQLDate(date) {
   const d = date instanceof Date ? date : new Date(date);
@@ -776,31 +774,41 @@ async function executeShopifyQLQuery(shop, accessToken, qlQuery, queryType) {
 }
 
 /**
+/**
+ * Separa la riga TOTALS (day=null/vuoto) dalle righe timeseries in una risposta
+ * ShopifyQL TIMESERIES day WITH TOTALS.
+ */
+function splitTotalsAndTimeseries(rows) {
+  if (!Array.isArray(rows)) return { totalsRow: null, timeseriesRows: [] };
+  const totalsRow = rows.find((r) => r.day == null || r.day === '') ?? null;
+  const timeseriesRows = rows.filter((r) => r.day != null && r.day !== '');
+  return { totalsRow, timeseriesRows };
+}
+
+/**
  * Recupera le metriche Shopify tramite ShopifyQL / Shopify Reports.
  *
- * Richiede lo scope read_reports. Se mancante (o access policy Shopify lo nega),
- * lancia SHOPIFY_REPORTS_ACCESS_REQUIRED così il chiamante attiva il fallback Admin API.
+ * Usa una singola query TIMESERIES day WITH TOTALS che restituisce:
+ *   - riga TOTALS (day=null): valori aggregati del periodo → usati per le card
+ *   - righe day:              serie giornaliera → usata per le sparkline
  *
- * Esegue tre query:
- *   1. Aggregato sales: metriche principali (+ units_sold e average_order_value opzionali)
- *   2. Customer type:   ordini/clienti distinti per first_time vs returning (non critica)
- *   3. Timeseries day:  serie giornaliere per le sparkline (non critica)
+ * Campi ShopifyQL usati (mapping definitivo):
+ *   sales_reversals   → shopify_returns
+ *   shipping_charges  → shopify_shipping
+ *   net_items_sold    → shopify_units_sold
+ *   returning_customer_rate → shopify_returning_customers (percentuale)
  *
- * Se units_sold o average_order_value causano un parse error, si ritenta
- * automaticamente con la query minimale senza di essi.
- *
- * @param {object} params
- * @param {string} params.clientId
- * @param {Date}   params.startDate
- * @param {Date}   params.endDate
+ * Se i campi opzionali (net_items_sold, average_order_value,
+ * returning_customer_rate) causano parse error, si ritenta con query minimale.
  *
  * @returns {{
- *   aggregateRows:     object[] | null,
- *   customerTypeRows:  object[] | null,
- *   timeseriesRows:    object[] | null,
- *   hasNetQuantity:    boolean,
- *   hasAverageOrderValue: boolean,
- *   meta: { startDate: Date, endDate: Date, fetchedAt: Date }
+ *   totalsRow:              object | null,
+ *   timeseriesRows:         object[],
+ *   hasNetItemsSold:        boolean,
+ *   hasAverageOrderValue:   boolean,
+ *   hasReturningCustomerRate: boolean,
+ *   diagnostics:            object,
+ *   meta:                   { startDate: Date, endDate: Date, fetchedAt: Date }
  * }}
  */
 export async function fetchShopifySalesReportQL({ clientId, startDate, endDate }) {
@@ -809,56 +817,98 @@ export async function fetchShopifySalesReportQL({ clientId, startDate, endDate }
   const since = formatShopifyQLDate(startDate);
   const until  = formatShopifyQLDate(endDate);
 
-  // ── 1. Query aggregato (con retry se i campi opzionali non sono supportati) ──
+  // ── Query unica TIMESERIES day WITH TOTALS ────────────────────────────────
+  // Campi garantiti: metriche finanziarie con nomi ShopifyQL aggiornati.
+  // Campi opzionali: net_items_sold, average_order_value, returning_customer_rate
+  // (retry senza di loro se il parser ShopifyQL li rifiuta).
 
-  let aggregateRows        = null;
-  let hasUnitsSold         = false;
-  let hasAverageOrderValue = false;
+  const fullQuery = `FROM sales SHOW total_sales, orders, average_order_value, gross_sales, discounts, sales_reversals, net_sales, shipping_charges, taxes, net_items_sold, returning_customer_rate TIMESERIES day WITH TOTALS, CURRENCY 'EUR' SINCE ${since} UNTIL ${until} ORDER BY day ASC LIMIT 1000`;
+  const minQuery  = `FROM sales SHOW total_sales, orders, gross_sales, discounts, sales_reversals, net_sales, shipping_charges, taxes TIMESERIES day WITH TOTALS, CURRENCY 'EUR' SINCE ${since} UNTIL ${until} ORDER BY day ASC LIMIT 1000`;
 
-  // Prima scelta: units_sold è il nome documentato da Shopify nel dataset FROM sales.
-  // average_order_value è opzionale; entrambi esclusi nel retry se il parser li rifiuta.
-  const fullAggQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders, units_sold, average_order_value SINCE ${since} UNTIL ${until}`;
+  let allRows                        = null;
+  let hasNetItemsSold                = false;
+  let hasAverageOrderValue           = false;
+  let hasReturningCustomerRate       = false;
+  let shopifyqlQueryType             = 'sales_timeseries_full';
+  let shopifyqlMinimalQueryAttempted = false;
+
   try {
-    aggregateRows        = await executeShopifyQLQuery(shop, accessToken, fullAggQuery, 'sales_aggregate_full');
-    hasUnitsSold         = true;
+    allRows              = await executeShopifyQLQuery(shop, accessToken, fullQuery, 'sales_timeseries_full');
+    hasNetItemsSold      = true;
     hasAverageOrderValue = true;
+    hasReturningCustomerRate = true;
   } catch (fullErr) {
     if (fullErr.code === 'SHOPIFY_QL_PARSE_ERROR') {
-      // Retry con soli i campi garantiti: units_sold e average_order_value → not_available
-      const minAggQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders SINCE ${since} UNTIL ${until}`;
-      aggregateRows = await executeShopifyQLQuery(shop, accessToken, minAggQuery, 'sales_aggregate_minimal');
-      // hasUnitsSold e hasAverageOrderValue rimangono false → not_available nel summary
+      shopifyqlMinimalQueryAttempted = true;
+      shopifyqlQueryType = 'sales_timeseries_minimal';
+      allRows = await executeShopifyQLQuery(shop, accessToken, minQuery, 'sales_timeseries_minimal');
+      // campi opzionali non disponibili → not_available nel summary
     } else {
       throw fullErr;
     }
   }
 
-  // ── 2+3. Customer type e timeseries in parallelo (entrambi non critici) ────
-  // Gli errori vengono silenziati: le metriche dipendenti saranno not_available.
+  const { totalsRow, timeseriesRows } = splitTotalsAndTimeseries(allRows);
 
-  const ctQuery = `FROM sales SHOW orders, customers GROUP BY customer_type SINCE ${since} UNTIL ${until}`;
-  const tsQuery = `FROM sales SHOW total_sales, gross_sales, discounts, returns, net_sales, shipping, taxes, orders TIMESERIES day SINCE ${since} UNTIL ${until}`;
-
-  const [ctResult, tsResult] = await Promise.allSettled([
-    executeShopifyQLQuery(shop, accessToken, ctQuery, 'customer_type'),
-    executeShopifyQLQuery(shop, accessToken, tsQuery, 'sales_timeseries'),
-  ]);
-
-  const customerTypeRows  = ctResult.status === 'fulfilled' ? ctResult.value : null;
-  // true solo se la query ha lanciato un errore (parse error, access denied, ecc.)
-  // false se è riuscita — anche se ha restituito zero righe (range senza ordini).
-  const customerTypeError = ctResult.status === 'rejected';
-  const timeseriesRows    = tsResult.status === 'fulfilled' ? tsResult.value : null;
+  const shopifyqlRawTableShape = {
+    hasTableData:       allRows !== null,
+    hasColumns:         Array.isArray(allRows) && allRows.length > 0,
+    hasRows:            Array.isArray(allRows) && allRows.length > 0,
+    rowCount:           Array.isArray(allRows) ? allRows.length : 0,
+    hasTotalsRow:       totalsRow !== null,
+    timeseriesRowCount: timeseriesRows.length,
+  };
 
   return {
-    aggregateRows,
-    customerTypeRows,
-    customerTypeError,
+    totalsRow,
     timeseriesRows,
-    hasUnitsSold,
+    hasNetItemsSold,
     hasAverageOrderValue,
+    hasReturningCustomerRate,
+    diagnostics: {
+      shopifyqlAttempted:             true,
+      shopifyqlFullQueryAttempted:    true,
+      shopifyqlMinimalQueryAttempted,
+      shopifyqlQueryType,
+      shopifyqlRawTableShape,
+    },
     meta: { startDate, endDate, fetchedAt: new Date() },
   };
+}
+
+/**
+ * Recupera gli scope realmente concessi al token Shopify installato.
+ * Usato per diagnostica — non espone token né dati sensibili.
+ * Ritorna null in caso di errore (best-effort).
+ *
+ * @param {string} clientId
+ * @returns {Promise<string[] | null>}
+ */
+export async function fetchShopifyGrantedScopes(clientId) {
+  try {
+    const { shop, accessToken } = await resolveShopifyIntegration(clientId);
+    const url = buildShopifyGraphQLUrl(shop);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SHOPIFY.FETCH_TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetch(url, {
+        method:  'POST',
+        headers: buildShopifyHeaders(accessToken),
+        body:    JSON.stringify({ query: `{ appInstallation { accessScopes { handle } } }` }),
+        signal:  controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => null);
+    const scopes = body?.data?.appInstallation?.accessScopes;
+    if (!Array.isArray(scopes)) return null;
+    return scopes.map((s) => s?.handle).filter(Boolean);
+  } catch {
+    return null;
+  }
 }
 
 // ── Admin API (ordini) ────────────────────────────────────────────────────────

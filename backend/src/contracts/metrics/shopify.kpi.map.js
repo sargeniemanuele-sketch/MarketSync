@@ -19,9 +19,6 @@ export const SHOPIFY_KPI_KEYS = Object.freeze({
   unitsSold: 'shopify_units_sold',
   newCustomers: 'shopify_new_customers',
   returningCustomers: 'shopify_returning_customers',
-  newCustomerOrders: 'shopify_new_customer_orders',
-  returningCustomerOrders: 'shopify_returning_customer_orders',
-  refundedAmount: 'shopify_refunded_amount',
 });
 
 export const SHOPIFY_DASHBOARD_PREVIEW_KEYS = Object.freeze([
@@ -47,9 +44,6 @@ export const SHOPIFY_SECONDARY_KPI_KEYS = Object.freeze([
   SHOPIFY_KPI_KEYS.unitsSold,
   SHOPIFY_KPI_KEYS.newCustomers,
   SHOPIFY_KPI_KEYS.returningCustomers,
-  SHOPIFY_KPI_KEYS.newCustomerOrders,
-  SHOPIFY_KPI_KEYS.returningCustomerOrders,
-  SHOPIFY_KPI_KEYS.refundedAmount,
 ]);
 
 export const SHOPIFY_KPI_DEFINITIONS = Object.freeze([
@@ -197,13 +191,13 @@ export const SHOPIFY_KPI_DEFINITIONS = Object.freeze([
     provider: 'shopify',
     internalKey: SHOPIFY_KPI_KEYS.newCustomers,
     legacyKey: 'new_customers',
-    officialLabel: 'New customers',
-    apiSource: 'customer/order history',
-    sourceType: 'calculated_from_customer_history',
-    formula: 'New customers = count(distinct customers whose order is classified as first-time)',
-    unit: 'number',
-    descriptionIt: 'Clienti distinti classificati come first-time purchasers nel periodo selezionato.',
-    formulaIt: 'New customers = conteggio clienti distinti classificati come nuovi.',
+    officialLabel: 'New customers rate',
+    apiSource: 'ShopifyQL returning_customer_rate',
+    sourceType: 'shopifyql_report',
+    formula: 'New customers rate = 100 - returning_customer_rate',
+    unit: 'percentage',
+    descriptionIt: 'Percentuale di ordini attribuiti a clienti first-time nel periodo selezionato, secondo Shopify Analytics.',
+    formulaIt: 'New customers rate = 100 - returning_customer_rate (ShopifyQL).',
     dashboardPreview: true,
     sourceDocUrl: SHOPIFY_ANALYTICS_FIELDS_URL,
   }),
@@ -211,55 +205,13 @@ export const SHOPIFY_KPI_DEFINITIONS = Object.freeze([
     provider: 'shopify',
     internalKey: SHOPIFY_KPI_KEYS.returningCustomers,
     legacyKey: 'returning_customers',
-    officialLabel: 'Returning customers',
-    apiSource: 'customer/order history',
-    sourceType: 'calculated_from_customer_history',
-    formula: 'Returning customers = count(distinct customers classified as returning)',
-    unit: 'number',
-    descriptionIt: 'Clienti distinti classificati come ricorrenti nel periodo selezionato.',
-    formulaIt: 'Returning customers = conteggio clienti distinti classificati come ricorrenti.',
-    dashboardPreview: false,
-    sourceDocUrl: SHOPIFY_ANALYTICS_FIELDS_URL,
-  }),
-  Object.freeze({
-    provider: 'shopify',
-    internalKey: SHOPIFY_KPI_KEYS.newCustomerOrders,
-    legacyKey: 'new_customer_orders',
-    officialLabel: 'New customer orders',
-    apiSource: 'customer/order history',
-    sourceType: 'calculated_from_customer_history',
-    formula: 'New customer orders = count(orders from first-time customers)',
-    unit: 'number',
-    descriptionIt: 'Numero di ordini attribuiti a clienti first-time nel periodo selezionato.',
-    formulaIt: 'New customer orders = conteggio ordini da clienti nuovi.',
-    dashboardPreview: false,
-    sourceDocUrl: SHOPIFY_ANALYTICS_FIELDS_URL,
-  }),
-  Object.freeze({
-    provider: 'shopify',
-    internalKey: SHOPIFY_KPI_KEYS.returningCustomerOrders,
-    legacyKey: 'returning_customer_orders',
-    officialLabel: 'Returning customer orders',
-    apiSource: 'customer/order history',
-    sourceType: 'calculated_from_customer_history',
-    formula: 'Returning customer orders = count(orders from returning customers)',
-    unit: 'number',
-    descriptionIt: 'Numero di ordini attribuiti a clienti ricorrenti nel periodo selezionato.',
-    formulaIt: 'Returning customer orders = conteggio ordini da clienti ricorrenti.',
-    dashboardPreview: false,
-    sourceDocUrl: SHOPIFY_ANALYTICS_FIELDS_URL,
-  }),
-  Object.freeze({
-    provider: 'shopify',
-    internalKey: SHOPIFY_KPI_KEYS.refundedAmount,
-    legacyKey: 'refunded_amount',
-    officialLabel: 'Refunded amount',
-    apiSource: 'refunds',
-    sourceType: 'calculated_from_refunds',
-    formula: 'Refunded amount = sum(successful refund transaction amounts)',
-    unit: 'currency',
-    descriptionIt: 'Importo monetario rimborsato ai clienti nel periodo selezionato.',
-    formulaIt: 'Refunded amount = somma degli importi delle transazioni di rimborso riuscite.',
+    officialLabel: 'Returning customers rate',
+    apiSource: 'ShopifyQL returning_customer_rate',
+    sourceType: 'shopifyql_report',
+    formula: 'Returning customers rate = returning_customer_rate',
+    unit: 'percentage',
+    descriptionIt: 'Percentuale di ordini attribuiti a clienti ricorrenti nel periodo selezionato, secondo Shopify Analytics.',
+    formulaIt: 'Returning customers rate = returning_customer_rate (ShopifyQL).',
     dashboardPreview: false,
     sourceDocUrl: SHOPIFY_ANALYTICS_FIELDS_URL,
   }),
@@ -279,6 +231,7 @@ export function buildShopifyCardDefinition(key) {
   const isTotalSales = definition.internalKey === SHOPIFY_KPI_KEYS.totalSales;
   const isCustomerHistory = definition.sourceType === 'calculated_from_customer_history';
 
+  const isCustomerRate = definition.sourceType === 'shopifyql_report';
   let note = null;
   if (isTotalSales) {
     note =
@@ -286,6 +239,8 @@ export function buildShopifyCardDefinition(key) {
   } else if (isCustomerHistory) {
     note =
       'Classificazione calcolata in base a customer.orders_count disponibile negli ordini recuperati. Puo dipendere dalla disponibilita dello storico cliente Shopify.';
+  } else if (isCustomerRate) {
+    note = null;
   } else if (definition.sourceType !== 'official_field') {
     note = 'Calcolato dai dati ordini Shopify se il report Analytics non e disponibile via API.';
   }

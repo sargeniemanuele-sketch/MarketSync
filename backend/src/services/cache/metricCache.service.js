@@ -183,14 +183,17 @@ export async function setCachedMetric(params, payload, { ttlMs } = {}) {
  * @param {Function} opts.buildLive    Async function che esegue la fetch live e ritorna i dati grezzi
  * @param {number}   [opts.ttlMs]      TTL per il documento cache; default: METRIC_CACHE.DEFAULT_TTL_MS
  * @param {Function} [opts.isCacheValid] Validatore opzionale: se ritorna false il cache hit viene ignorato
+ * @param {boolean}  [opts.bypassCache] Se true, salta la lettura cache e forza una fetch live
  *
  * @returns {Promise<{ data: any, meta: object, source: 'cache'|'live'|'stale' }>}
  */
-export async function resolveWithCache({ cacheParams, buildLive, ttlMs, isCacheValid }) {
-  // 1. Cache fresca
-  const cached = await getCachedMetric(cacheParams);
-  if (cached.hit && (!isCacheValid || isCacheValid(cached.data))) {
-    return { data: cached.data, meta: cached.meta, source: 'cache' };
+export async function resolveWithCache({ cacheParams, buildLive, ttlMs, isCacheValid, bypassCache = false }) {
+  // 1. Cache fresca (saltata se bypassCache=true)
+  if (!bypassCache) {
+    const cached = await getCachedMetric(cacheParams);
+    if (cached.hit && (!isCacheValid || isCacheValid(cached.data))) {
+      return { data: cached.data, meta: cached.meta, source: 'cache' };
+    }
   }
 
   const key = buildCacheKey(cacheParams);
